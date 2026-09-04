@@ -86,6 +86,7 @@ $pyInstallerArgs = @(
     "--name", "JiraReminders",
     "--icon", $iconFile,
     "--version-file", $versionInfo,
+    "--add-data", (Join-Path $repoRoot "card-bg\card.png") + ";card-bg",
     "--distpath", $appDist,
     "--workpath", (Join-Path $buildRoot "pyinstaller"),
     "--specpath", $buildRoot,
