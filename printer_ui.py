@@ -75,7 +75,7 @@ class PrinterPanel(tk.Frame):
 
 		preview = tk.Frame(right, bg=WHITE, highlightbackground=BORDER,
 						   highlightthickness=1, width=PREVIEW_WIDTH, height=PREVIEW_HEIGHT)
-		preview.pack(anchor="nw", padx=24, pady=4)
+		preview.pack(anchor="n", padx=24, pady=4)
 		preview.pack_propagate(False)
 		asset_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 		background = Image.open(asset_root / "card-bg" / "card.png")
