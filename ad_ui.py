@@ -10,7 +10,8 @@ from datetime import datetime
 
 from ad_automation import (
     detect_location, detect_site, detect_location_conflict, detect_address_warning,
-    detect_domain, build_email, DEFAULT_GROUPS,
+    detect_domain, build_email, uses_retired_tndm_email_domain, DEFAULT_GROUPS,
+    generate_password,
     find_user_accounts, find_user_account_by_username,
     select_new_joiner_account, classify_scenario,
     get_buddy_info, get_account_groups, build_verification_script,
@@ -418,7 +419,7 @@ class ADSetupWindow(tk.Toplevel):
         # ── 7. Password ───────────────────────────────────────────────────────
         sec7 = self._section(body, "7. Password")
 
-        self._pwd_var = tk.StringVar(value="Welcome123")
+        self._pwd_var = tk.StringVar(value=generate_password())
         self._pwd_visible = False
         pwd_row = tk.Frame(sec7, bg=BG)
         pwd_row.pack(fill="x")
@@ -811,6 +812,11 @@ class ADSetupWindow(tk.Toplevel):
             raise ValueError("Email address is required.")
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
             raise ValueError(f"'{email}' does not look like a valid email address.")
+        if uses_retired_tndm_email_domain(email):
+            raise ValueError(
+                "The @tndmtrucking.com domain is retired. Use the employee's "
+                "@girteka.eu address."
+            )
         if not password:
             raise ValueError("Password is required.")
         if not ou:
@@ -1013,15 +1019,17 @@ class ADSetupWindow(tk.Toplevel):
     def _copy_sensitive(self, text: str):
         """Copy text and schedule an automatic clipboard clear after 30 s."""
         self._copy(text)
-        self.after(_CLIPBOARD_CLEAR_MS, self._clear_clipboard_if_unchanged)
-        self._last_copied = text
+        self.after(
+            _CLIPBOARD_CLEAR_MS,
+            lambda expected=text: self._clear_clipboard_if_unchanged(expected),
+        )
 
-    def _clear_clipboard_if_unchanged(self):
+    def _clear_clipboard_if_unchanged(self, expected: str):
         try:
             current = self.clipboard_get()
         except tk.TclError:
             return
-        if current == getattr(self, "_last_copied", None):
+        if current == expected:
             self.clipboard_clear()
             self.clipboard_append("")
 

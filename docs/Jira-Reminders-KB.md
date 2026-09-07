@@ -4,7 +4,7 @@
 |---|---|
 | Audience | IT Service Desk team members handling employee onboarding |
 | Supported locations | Vilnius, Šiauliai, Poznań / Poland, and GBS |
-| Application version | 1.5.3 |
+| Application version | 1.6.0 |
 | Owner | IT Service Desk |
 | Last updated | 21 August 2026 |
 | Estimated setup time | 5–10 minutes |
@@ -37,8 +37,15 @@ The mover workflow changes only Active Directory. It aligns copyable direct
 groups and the OU with the Buddy, uses the Buddy's Department, applies the Jira
 new title to both Title and Description, and applies the Jira Company and
 Manager. Address fields come from the same validated company/location mappings
-used for onboarding. Email, password, UPN, and proxy addresses are preserved.
-Jira ticket status changes remain manual.
+used for onboarding. Password and UPN are preserved, as are email and proxy
+addresses except for the Girteka Dedicated rule below. Jira ticket status
+changes remain manual.
+
+The exception is a target company named `TNDM`, `TNDM Trucking`, or `Girteka
+Dedicated`. These Jira values all represent Girteka Dedicated. The mover keeps
+the existing email local part but uses `@girteka.eu`; the workflow also aligns
+`targetAddress` and the primary SMTP proxy and removes any retired
+`@tndmtrucking.com` proxy. Password and UPN remain unchanged.
 
 If Buddy and Axapta rights differ, Buddy remains the AD template and the app
 shows the separate Axapta user as a follow-up. If Buddy is empty, Axapta rights
@@ -70,9 +77,9 @@ You do **not** need to install Python, download repository source files, run
 ## 1. Download and install Jira Reminders
 
 1. Open the official
-   [Jira Reminders v1.5.3 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.5.3).
+   [Jira Reminders v1.6.0 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.6.0).
 2. Download
-   [Jira-Reminders-1.5.3.msi](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/download/v1.5.3/Jira-Reminders-1.5.3.msi).
+   [Jira-Reminders-1.6.0.msi](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/download/v1.6.0/Jira-Reminders-1.6.0.msi).
 3. Open the downloaded MSI.
 4. Complete the Windows Installer process.
 5. Wait for **Welcome to Jira Reminders** to open automatically.
@@ -83,7 +90,7 @@ The installer creates:
 - a **Jira Reminders** Start menu shortcut; and
 - a Windows Startup shortcut so the app launches whenever you sign in.
 
-> **Unknown publisher:** Version 1.5.3 is not Authenticode-signed, so Windows
+> **Unknown publisher:** Version 1.6.0 is not Authenticode-signed, so Windows
 > may show an **Unknown publisher** message. Only continue when the MSI was
 > downloaded from the official GitHub release above. If company policy blocks
 > it, contact the application owner instead of bypassing the policy.
@@ -200,14 +207,23 @@ Girtrans, KLP Transport, Premium Trans, and TermoTrans.
 Recognised Polish companies include Girpoltrans, TransEu Poland, Eupoltrans,
 Scanpoltrans, Polservice, GoTrans, ME Trailers Poland, and ClassTrucks Poland.
 
-Recognised Vilnius companies include Trucks Merchant, Willgrow, GCC, TNDM
-Trucking, Girteka Nordic, Girteka Transport, Girteka, Girteka Group, Girteka
-Logistics, ME Trailers, and Girteka Cargo.
+Recognised Vilnius companies include Trucks Merchant, Willgrow, GCC, TNDM/TNDM
+Trucking, Girteka Dedicated, Girteka Nordic, Girteka Transport, Girteka, Girteka
+Group, Girteka Logistics, ME Trailers, and Girteka Cargo. Both the old and new
+Dedicated names use Girteka attributes, the standard Girteka email format, and
+the `@girteka.eu` domain during onboarding.
 
 ## Settings, data, and security
 
 - Jira and Snipe-IT tokens are stored in **Windows Credential Manager**.
 - Tokens are not written to `config.json`.
+- Snipe-IT access is read-only and is used only to display assets already
+  assigned to a joiner.
+- Each AD setup starts with a freshly generated random password. Completed
+  handoff passwords are stored in Windows Credential Manager, not in
+  `tasks.json` or its new backups.
+- Passwords are masked in the AD wizard and sensitive clipboard copies clear
+  automatically after 30 seconds.
 - Personal settings, checklist progress, notes, backups, and the AD audit log
   are stored under `%USERPROFILE%\.jira-reminders`.
 - Uninstalling the app keeps this personal data so it is available after a
@@ -266,5 +282,5 @@ Never provide your Jira or Snipe-IT API token.
 
 ## References
 
-- [Jira Reminders v1.5.3 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.5.3)
+- [Jira Reminders v1.6.0 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.6.0)
 - [Atlassian — Manage API tokens for your account](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/)

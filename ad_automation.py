@@ -26,6 +26,10 @@ SF_OU_FRAGMENT = "Active_Users_from_SF"   # substring present in the SF provisio
 
 _TRANSLIT = str.maketrans("ąčęėįšųūžĄČĘĖĮŠŲŪŽ", "aceeisuuzACEEISUUZ")
 
+GIRTEKA_EMAIL_DOMAIN = "girteka.eu"
+RETIRED_TNDM_EMAIL_DOMAIN = "tndmtrucking.com"
+
+
 def _ascii(name: str) -> str:
     return name.translate(_TRANSLIT)
 
@@ -79,7 +83,20 @@ def _proxy_address_lines(sam: str, email: str) -> list[str]:
         "# Set primary SMTP proxy address",
         f"$smtpAddress = 'SMTP:{_e(email)}'",
         f"$currentProxies = @(Get-ADUser -Identity '{sam}' -Properties proxyAddresses).proxyAddresses",
-        "if ($currentProxies -notcontains $smtpAddress) {",
+        "# Remove addresses from TNDM's retired mail domain",
+        f"$retiredTndmProxies = $currentProxies | Where-Object {{ $_ -imatch '^smtp:.+@{RETIRED_TNDM_EMAIL_DOMAIN.replace('.', r'\.')}$' }}",
+        "foreach ($addr in $retiredTndmProxies) {",
+        f"    Set-ADUser -Identity '{sam}' -Remove @{{proxyAddresses=$addr}}",
+        '    Write-Host "OK  Removed retired TNDM proxy $addr"',
+        "}",
+        "",
+        "# Promote this address to the one case-sensitive primary SMTP value",
+        "$wrongCaseMatches = $currentProxies | Where-Object { $_ -ieq $smtpAddress -and $_ -cne $smtpAddress }",
+        "foreach ($addr in $wrongCaseMatches) {",
+        f"    Set-ADUser -Identity '{sam}' -Remove @{{proxyAddresses=$addr}}",
+        "}",
+        f"$currentProxies = @((Get-ADUser -Identity '{sam}' -Properties proxyAddresses).proxyAddresses)",
+        "if ($currentProxies -cnotcontains $smtpAddress) {",
         f"    Set-ADUser -Identity '{sam}' -Add @{{proxyAddresses=$smtpAddress}}",
         '    Write-Host "OK  proxyAddresses set"',
         "} else {",
@@ -171,6 +188,18 @@ def _matches_any(value: str, keywords: list[str]) -> bool:
     return any(f" {_normalise_location_text(keyword)} " in padded for keyword in keywords)
 
 
+_GIRTEKA_DEDICATED_COMPANY_ALIASES = [
+    "tndm",
+    "tndm trucking",
+    "girteka dedicated",
+]
+
+
+def is_girteka_dedicated_company(company: str) -> bool:
+    """Return whether Jira names the former TNDM/Girteka Dedicated company."""
+    return _matches_any(company, _GIRTEKA_DEDICATED_COMPANY_ALIASES)
+
+
 _OFFICE_SITE_KEYWORDS: list[tuple[str, list[str]]] = [
     ("georgia", ["georgia", "gbs", "tbilisi", "kutaisi", "business services"]),
     ("poland", ["poland", "warszawa", "warsaw", "krakow", "wroclaw",
@@ -192,7 +221,8 @@ _COMPANY_SITE_KEYWORDS: list[tuple[str, list[str]]] = [
         "klp transport", "premium trans", "termotrans",
     ]),
     ("vilnius", [
-        "trucks merchant", "willgrow", "gcc", "tndm trucking", "tndm",
+        "trucks merchant", "willgrow", "gcc",
+        *_GIRTEKA_DEDICATED_COMPANY_ALIASES,
         "girteka nordic", "girteka transport", "girteka group",
         "girteka logistics", "me trailers", "girteka cargo",
         "classtrucks", "girteka",
@@ -262,16 +292,32 @@ _DOMAIN_MAP = [
     ("everwest",    "everwest.net"),
     ("willgrow",    "willgrow.com"),
     ("sirin",       "sirin.eu"),
-    ("tndm",        "tndmtrucking.com"),
     ("classtrucks", "classtrucks.com"),
-    ("girteka",     "girteka.eu"),
+    ("girteka",     GIRTEKA_EMAIL_DOMAIN),
 ]
 
 def detect_domain(company: str) -> str:
+    if is_girteka_dedicated_company(company):
+        return GIRTEKA_EMAIL_DOMAIN
     for keyword, domain in _DOMAIN_MAP:
         if keyword in company.lower():
             return domain
-    return "girteka.eu"
+    return GIRTEKA_EMAIL_DOMAIN
+
+
+def uses_retired_tndm_email_domain(email: str) -> bool:
+    """Return whether an address still uses TNDM's retired email domain."""
+    _local, separator, domain = (email or "").strip().rpartition("@")
+    return bool(separator and domain.casefold() == RETIRED_TNDM_EMAIL_DOMAIN)
+
+
+def girteka_email_from_existing(email: str) -> str:
+    """Keep an existing email local part and move it to Girteka's domain."""
+    email = (email or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("The AD account has no valid email address to migrate to Girteka.")
+    local, _separator, _domain = email.rpartition("@")
+    return f"{local}@{GIRTEKA_EMAIL_DOMAIN}"
 
 _LAISVES_ADDRESS = {
     "street":  "Laisvės pr. 36",
@@ -344,8 +390,8 @@ def detect_company_address(company: str, office: str = "") -> dict:
 def build_email(first: str, last: str, domain: str) -> str:
     f = _ascii(first).strip()
     l = _ascii(last).strip()
-    if domain == "tndmtrucking.com":
-        return f"{f[0].upper()}{l.capitalize()}@{domain}"
+    if (domain or "").strip().casefold() == RETIRED_TNDM_EMAIL_DOMAIN:
+        domain = GIRTEKA_EMAIL_DOMAIN
     return f"{f.capitalize()}.{l.capitalize()}@{domain}"
 
 # ── Default AD groups ─────────────────────────────────────────────────────────

@@ -177,6 +177,40 @@ class MoverScriptTests(unittest.TestCase):
         self.assertEqual(plan["address"]["city"], "Vilnius")
         self.assertEqual(plan["address"]["country"], "LT")
 
+    def test_tndm_and_dedicated_movers_receive_girteka_email_policy(self):
+        self.mover["email"] = "Legacy.User@tndmtrucking.com"
+        for company in ("TNDM", "TNDM Trucking, UAB", "Girteka Dedicated"):
+            with self.subTest(company=company):
+                self.ticket["company_name"] = company
+                self.ticket["office"] = ""
+                plan = build_mover_plan(
+                    self.ticket, self.mover, self.buddy, self.manager
+                )
+                script = build_mover_script(plan)
+
+                self.assertEqual(plan["email_target"], "Legacy.User@girteka.eu")
+                self.assertEqual(plan["address"]["city"], "Vilnius")
+                self.assertEqual(plan["address"]["ext15"], "SF")
+                self.assertIn(f"Company = '{company}'", script)
+                self.assertIn("$newEmail = 'Legacy.User@girteka.eu'", script)
+                self.assertIn("@tndmtrucking\\.com$", script)
+                self.assertIn("Primary SMTP verification failed", script)
+
+    def test_other_company_movers_keep_existing_email_behavior(self):
+        self.mover["email"] = "Existing.User@example.com"
+        plan = build_mover_plan(self.ticket, self.mover, self.buddy, self.manager)
+        script = build_mover_script(plan)
+
+        self.assertEqual(plan["email_target"], "")
+        self.assertNotIn("$newEmail", script)
+        self.assertNotIn("targetAddress", script)
+
+    def test_dedicated_mover_requires_an_existing_email_local_part(self):
+        self.ticket["company_name"] = "Girteka Dedicated"
+        self.mover["email"] = ""
+        with self.assertRaisesRegex(ValueError, "no valid email address"):
+            build_mover_plan(self.ticket, self.mover, self.buddy, self.manager)
+
 
 if __name__ == "__main__":
     unittest.main()

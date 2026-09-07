@@ -10,10 +10,13 @@ from datetime import datetime
 DATA_DIR = Path.home() / ".jira-reminders"
 TASKS_FILE = DATA_DIR / "tasks.json"
 CONFIG_FILE = DATA_DIR / "config.json"
-DEFAULT_TASK_COUNT = 6
+DEFAULT_TASK_COUNT = 5
+TASK_SCHEMA_VERSION = 2
+_TASK_SCHEMA_VERSION_KEY = "__task_schema_version"
 
 _KEYRING_SERVICE      = "jira-reminders"
 _SNIPEIT_KEYRING_USER = "snipeit-token"
+_AD_PASSWORD_PREFIX   = "ad-password:"
 
 try:
     import keyring as _keyring
@@ -106,6 +109,31 @@ def load_snipeit_token() -> str:
     return ""
 
 
+def _save_ad_password(ticket_id: str, password: str) -> None:
+    """Store an onboarding password outside the JSON task history."""
+    if _KEYRING_OK and ticket_id and password:
+        try:
+            _keyring.set_password(
+                _KEYRING_SERVICE, f"{_AD_PASSWORD_PREFIX}{ticket_id}", password
+            )
+        except Exception:
+            pass
+
+
+def _load_ad_password(ticket_id: str) -> str:
+    if _KEYRING_OK and ticket_id:
+        try:
+            return (
+                _keyring.get_password(
+                    _KEYRING_SERVICE, f"{_AD_PASSWORD_PREFIX}{ticket_id}"
+                )
+                or ""
+            )
+        except Exception:
+            pass
+    return ""
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def load_config() -> dict | None:
@@ -149,15 +177,64 @@ def save_config(cfg: dict) -> None:
 class TaskStorage:
     def __init__(self):
         self._data: dict = _load(TASKS_FILE)
+        self._session_ad_passwords: dict[str, str] = {}
+        self._migrate_legacy_ad_passwords()
+        self._migrate_task_schema()
 
     # ── Tasks ─────────────────────────────────────────────────────────────────
 
+    def _migrate_task_schema(self) -> None:
+        """Convert legacy positional checklist state to the current five tasks.
+
+        Legacy six-item order:
+        AD, Axapta, hardware preparation, Snipe-IT assignment, SIM, physical access.
+
+        The older five-item order had no separate SIM entry. The new AX user
+        relations item has no legacy equivalent, so it intentionally starts
+        incomplete while meaningful completion state is preserved.
+        """
+        try:
+            version = int(self._data.get(_TASK_SCHEMA_VERSION_KEY, 0))
+        except (TypeError, ValueError):
+            version = 0
+        if version >= TASK_SCHEMA_VERSION:
+            return
+
+        for ticket_id, raw in list(self._data.items()):
+            if str(ticket_id).startswith("__") or not isinstance(raw, list):
+                continue
+            legacy = list(raw)
+            if len(legacy) >= 6:
+                migrated = [legacy[0], legacy[1], False, legacy[3], legacy[5]]
+            else:
+                legacy += [False] * (5 - len(legacy))
+                migrated = [legacy[0], legacy[1], False, legacy[3], legacy[4]]
+            self._data[ticket_id] = migrated
+
+        self._data[_TASK_SCHEMA_VERSION_KEY] = TASK_SCHEMA_VERSION
+        _save(TASKS_FILE, self._data)
+
+    def _migrate_legacy_ad_passwords(self) -> None:
+        """Remove legacy plaintext onboarding passwords from task history."""
+        changed = False
+        for key, raw in list(self._data.items()):
+            if not str(key).startswith("__ad_setup_") or not isinstance(raw, dict):
+                continue
+            password = str(raw.get("password") or "")
+            if not password:
+                continue
+            ticket_id = str(key)[len("__ad_setup_"):]
+            self._session_ad_passwords[ticket_id] = password
+            _save_ad_password(ticket_id, password)
+            scrubbed = dict(raw)
+            scrubbed.pop("password", None)
+            self._data[key] = scrubbed
+            changed = True
+        if changed:
+            _save(TASKS_FILE, self._data)
+
     def get(self, ticket_id: str, task_count: int = DEFAULT_TASK_COUNT) -> list[bool]:
         raw = self._data.get(ticket_id, [])
-        if task_count == 6 and isinstance(raw, list) and len(raw) == 5:
-            raw = [raw[0], raw[1], raw[2], raw[3], False, raw[4]]
-            self._data[ticket_id] = raw
-            _save(TASKS_FILE, self._data)
         result = list(raw) + [False] * task_count
         return result[:task_count]
 
@@ -202,10 +279,21 @@ class TaskStorage:
 
     def get_ad_setup(self, ticket_id: str) -> dict:
         raw = self._data.get(f"__ad_setup_{ticket_id}", {})
-        return raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        result = dict(raw)
+        password = self._session_ad_passwords.get(ticket_id) or _load_ad_password(ticket_id)
+        if password:
+            result["password"] = password
+        return result
 
     def mark_ad_setup(self, ticket_id: str, info: dict) -> None:
-        self._data[f"__ad_setup_{ticket_id}"] = info
+        safe_info = dict(info)
+        password = str(safe_info.pop("password", "") or "")
+        if password:
+            self._session_ad_passwords[ticket_id] = password
+            _save_ad_password(ticket_id, password)
+        self._data[f"__ad_setup_{ticket_id}"] = safe_info
         _save(TASKS_FILE, self._data)
 
     def ad_setup_done(self, ticket_id: str) -> bool:

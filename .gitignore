@@ -3,6 +3,27 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+config.json
+tasks.json
+ad_audit.log
 
 # Claude Code local settings
 .claude/
@@ -17,7 +38,7 @@ Thumbs.db
 generated_docs/
 
 # Local updater output
-update.log
+*.log
 _update_staging/
 
 # Installer build output
