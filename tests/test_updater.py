@@ -1,4 +1,7 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import requests
@@ -84,6 +87,37 @@ class InstalledUpdaterTests(unittest.TestCase):
         with patch.object(updater.requests, "get", return_value=response):
             with self.assertRaisesRegex(updater.UpdateCheckError, "unexpected"):
                 updater.check_for_update()
+
+    def test_msi_restart_uses_a_fresh_pyinstaller_runtime(self):
+        # The old app's bootloader state survives through WScript/PowerShell,
+        # even though its extracted runtime is deleted before the restart.
+        inherited_env = {
+            "_PYI_APPLICATION_HOME_DIR": r"C:\Temp\_MEI110722",
+            "_PYI_ARCHIVE_FILE": r"C:\Apps\JiraReminders.exe",
+            "_PYI_PARENT_PROCESS_LEVEL": "1",
+            "SYSTEMROOT": r"C:\Windows",
+            "TEMP": r"C:\Temp",
+        }
+        for reset_value in (None, "0", "1"):
+            with self.subTest(reset_value=reset_value):
+                parent_env = dict(inherited_env)
+                if reset_value is not None:
+                    parent_env["PYINSTALLER_RESET_ENVIRONMENT"] = reset_value
+                with (
+                    tempfile.TemporaryDirectory() as temp_dir,
+                    patch.dict(os.environ, parent_env, clear=True),
+                    patch.object(updater, "IS_FROZEN", True),
+                    patch.object(updater, "_STAGING_DIR", Path(temp_dir)),
+                    patch.object(updater.subprocess, "Popen") as popen,
+                ):
+                    updater._launch_msi_update(Path(temp_dir) / "update.msi")
+
+                    popen.assert_called_once()
+                    child_env = popen.call_args.kwargs["env"]
+                    self.assertEqual(child_env["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+                    for name, value in inherited_env.items():
+                        self.assertEqual(child_env[name], value)
+                    self.assertEqual(dict(os.environ), parent_env)
 
 
 if __name__ == "__main__":

@@ -67,3 +67,22 @@ automatically generated notes.
 - upgrades older MSI versions in place;
 - registers with Windows Installed Apps for standard uninstall;
 - keeps user data in `%USERPROFILE%\.jira-reminders` when uninstalled.
+
+## Python DLL error after an automatic update
+
+If the automatic restart reports `Failed to load Python DLL` from a temporary
+`_MEI...` folder, dismiss the error and open Jira Reminders from the Start menu
+or Desktop shortcut. The MSI may already have installed successfully; check
+the app's version after reopening it.
+
+The update helper must launch with `PYINSTALLER_RESET_ENVIRONMENT=1`. WScript
+and PowerShell otherwise pass the old application's PyInstaller environment to
+the restarted executable, which can try to reuse temporary Python files that
+were deleted when the old app exited. See
+[PyInstaller's restart guidance](https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#using-sys-executable-to-spawn-subprocesses-that-outlive-the-application-process-implementing-application-restart).
+
+The fixed updater takes effect once the new build is installed. An update
+started by an older installed build can still show the error once; reopen the
+app manually if that happens. If a normal shortcut launch also fails, investigate
+the installation and endpoint-security logs on the affected computer; a missing
+DLL or one of its dependencies can have other causes.
