@@ -64,6 +64,14 @@ same migrated company:
 
 There is no active `@tndmtrucking.com` email path in the application.
 
+### Access-card images
+
+The **Card printer** tab previews a personalized Girteka card using the employee's
+name and an existing card number (one to four digits after `LT`). **Export PNG**
+saves the preview at the template's full resolution for use in your card-printing
+software. Long names are resized to fit; names that cannot fit require a shorter
+display name. This tab does not reserve card numbers or send jobs to a printer.
+
 ## Safety boundaries
 
 - Snipe-IT access is **read-only**. The app only finds users and displays their
