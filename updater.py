@@ -224,6 +224,10 @@ def _launch_msi_update(msi_path: Path) -> None:
     subprocess.Popen(
         ["wscript.exe", str(vbs)],
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+        # WScript and PowerShell pass this on to the restarted executable.
+        # It must unpack a fresh runtime: the old _MEI directory is removed
+        # when the current one-file application exits.
+        env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
     )
 
 
