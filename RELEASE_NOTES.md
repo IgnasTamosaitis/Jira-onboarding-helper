@@ -2,6 +2,16 @@
 
 ---
 
+## v1.6.2 - Restore required AD setup password
+
+Released 9 September 2026.
+
+- Restored `Welcome123` for every new-joiner and rejoiner AD setup
+- Removed random password generation and made the password and script review
+  read-only so the reset and saved handoff always use the required password
+
+---
+
 ## v1.6.1 - Fix restart after automatic updates
 
 Released 7 September 2026.

@@ -12,7 +12,6 @@ Scenarios detected by searching AD by first+last name:
 """
 import os
 import re
-import secrets
 import subprocess
 import tempfile
 import unicodedata
@@ -21,6 +20,8 @@ from html import unescape
 from group_policy import is_blocked_group
 
 SF_OU_FRAGMENT = "Active_Users_from_SF"   # substring present in the SF provisioning OU
+# Required onboarding password for every new-joiner and rejoiner AD setup.
+AD_SETUP_PASSWORD = "Welcome123"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -403,31 +404,6 @@ DEFAULT_GROUPS: dict[str, list[str]] = {
     "georgia":   ["AX30", "AX30_LT", "M365_E3", "MFA Users", "VPN Work From Home",
                   "WFG All", "DL_GBS_office"],
 }
-
-# ── Password generation ───────────────────────────────────────────────────────
-
-def generate_password(length: int = 10) -> str:
-    """Generate a short readable password with one special character."""
-    if length < 4:
-        raise ValueError("Password length must be at least 4 characters.")
-
-    upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
-    lower = "abcdefghijkmnopqrstuvwxyz"
-    digits = "23456789"
-    special = "#@!"
-    pool = upper + lower + digits
-
-    chars = [
-        secrets.choice(upper),
-        secrets.choice(lower),
-        secrets.choice(digits),
-        secrets.choice(special),
-    ]
-    chars.extend(secrets.choice(pool) for _ in range(length - len(chars)))
-
-    randomizer = secrets.SystemRandom()
-    randomizer.shuffle(chars)
-    return "".join(chars)
 
 # ── PowerShell runner ─────────────────────────────────────────────────────────
 
@@ -847,9 +823,9 @@ def _group_add_lines(sam: str, groups: list[str]) -> list[str]:
     return lines
 
 
-def _password_reset_lines(sam: str, password: str) -> list[str]:
+def _password_reset_lines(sam: str) -> list[str]:
     sam_e = _e(sam)
-    pwd_e = _e(password)
+    pwd_e = _e(AD_SETUP_PASSWORD)
     return [
         "# Reset password, unlock the account if needed, and validate on the same DC",
         f"$plainPassword = '{pwd_e}'",
@@ -879,7 +855,7 @@ def _password_reset_lines(sam: str, password: str) -> list[str]:
 # ── Script builders ───────────────────────────────────────────────────────────
 
 def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
-                             email: str, password: str, groups: list[str],
+                             email: str, groups: list[str],
                              department: str = "", ext_attrs: dict = None) -> str:
     """
     New joiner: SF already sets Title, Description, Department, Company, Office,
@@ -925,7 +901,7 @@ def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
     L += _group_add_lines(sf_account["username"], groups)
     L += ['Write-Host "OK  Groups assigned"', ""]
 
-    L += _password_reset_lines(sf_account["username"], password)
+    L += _password_reset_lines(sf_account["username"])
 
     L += _proxy_address_lines(username, email)
 
@@ -968,7 +944,7 @@ def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
 
 
 def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict,
-                                target_ou: str, email: str, password: str,
+                                target_ou: str, email: str,
                                 groups: list[str], department: str = "",
                                 ext_attrs: dict = None) -> str:
     """
@@ -1033,7 +1009,7 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
     L += _group_add_lines(old_account["username"], groups)
     L += ['Write-Host "OK  Groups assigned"', ""]
 
-    L += _password_reset_lines(old_account["username"], password)
+    L += _password_reset_lines(old_account["username"])
 
     L += _proxy_address_lines(old_sam, email)
 
@@ -1123,7 +1099,7 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
 
 
 def build_rejoiner_single_script(ticket: dict, account: dict, target_ou: str,
-                                  email: str, password: str, groups: list[str],
+                                  email: str, groups: list[str],
                                   department: str = "", ext_attrs: dict = None) -> str:
     """
     Rejoiner with only one account (no SF duplicate).
@@ -1173,7 +1149,7 @@ def build_rejoiner_single_script(ticket: dict, account: dict, target_ou: str,
     L += _group_add_lines(account["username"], groups)
     L += ['Write-Host "OK  Groups assigned"', ""]
 
-    L += _password_reset_lines(account["username"], password)
+    L += _password_reset_lines(account["username"])
 
     L += _proxy_address_lines(sam, email)
     L += _set_user_attribute_lines(sam, email, title, office, manager, _e(company), address, department)
