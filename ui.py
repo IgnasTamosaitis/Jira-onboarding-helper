@@ -10,7 +10,7 @@ import unicodedata
 from jira_client import DEFAULT_MOVER_JQL, extract_buddies_from_comments, is_sam_account
 from ad_automation import find_user_accounts, classify_scenario
 from mover_ui import MoversPanel
-from printer_ui import PrinterPanel
+
 
 TASKS = [
     "Active Directory account setup",
@@ -104,16 +104,13 @@ class MainWindow(tk.Toplevel):
         notebook = ttk.Notebook(self._main_frame, style="Main.TNotebook")
         joiners_tab = tk.Frame(notebook, bg=BG)
         movers_tab = tk.Frame(notebook, bg=BG)
-        printer_tab = tk.Frame(notebook, bg=BG)
         notebook.add(joiners_tab, text="  New joiners  ")
         notebook.add(movers_tab, text="  Movers  ")
-        notebook.add(printer_tab, text="  Card printer  ")
         self._build_joiners_tab(joiners_tab)
         self._movers_panel = MoversPanel(
             movers_tab, self.movers, self.storage, self.jira, self.on_refresh
         )
         self._movers_panel.pack(fill="both", expand=True)
-        PrinterPanel(printer_tab).pack(fill="both", expand=True)
         notebook.pack(fill="both", expand=True)
         self._main_frame.pack(fill="both", expand=True)
 

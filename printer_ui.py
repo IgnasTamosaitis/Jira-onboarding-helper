@@ -195,3 +195,16 @@ class PrinterPanel(tk.Frame):
 	@staticmethod
 	def _validate_number(value):
 		return len(value) <= 4 and value.isdigit() or value == ""
+
+
+def main():
+	root = tk.Tk()
+	root.title("Card Printer")
+	root.geometry("820x380")
+	root.minsize(760, 340)
+	PrinterPanel(root).pack(fill="both", expand=True)
+	root.mainloop()
+
+
+if __name__ == "__main__":
+	main()
