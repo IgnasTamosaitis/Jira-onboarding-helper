@@ -11,7 +11,7 @@ from datetime import datetime
 from ad_automation import (
     detect_location, detect_site, detect_location_conflict, detect_address_warning,
     detect_domain, build_email, uses_retired_tndm_email_domain, DEFAULT_GROUPS,
-    generate_password,
+    AD_SETUP_PASSWORD,
     find_user_accounts, find_user_account_by_username,
     select_new_joiner_account, classify_scenario,
     get_buddy_info, get_account_groups, build_verification_script,
@@ -419,14 +419,15 @@ class ADSetupWindow(tk.Toplevel):
         # ── 7. Password ───────────────────────────────────────────────────────
         sec7 = self._section(body, "7. Password")
 
-        self._pwd_var = tk.StringVar(value=generate_password())
+        self._pwd_var = tk.StringVar(value=AD_SETUP_PASSWORD)
         self._pwd_visible = False
         pwd_row = tk.Frame(sec7, bg=BG)
         pwd_row.pack(fill="x")
         tk.Label(pwd_row, text="Password:", bg=BG, fg=GRAY,
                  font=("Segoe UI", 9), width=12, anchor="e").pack(side="left")
         self._pwd_entry = tk.Entry(pwd_row, textvariable=self._pwd_var, font=("Consolas", 11),
-                                   relief="solid", bd=1, width=20, show="*")
+                                   relief="solid", bd=1, width=20, show="*",
+                                   state="readonly", readonlybackground=WHITE)
         self._pwd_entry.pack(side="left", padx=6, ipady=3)
         self._show_btn = self._btn(pwd_row, "Show", self._toggle_pwd_visibility,
                                    bg="#DEEBFF", fg=ACCENT)
@@ -462,7 +463,7 @@ class ADSetupWindow(tk.Toplevel):
         script_frame = tk.Frame(sec8, bg=BG)
         script_frame.pack(fill="x", pady=(6, 4))
         self._script_box = self._scrollable_text(
-            script_frame, height=18, bg=WHITE, fg=TEXT)
+            script_frame, height=18, bg=WHITE, fg=TEXT, state="disabled")
         self._script_box.config(insertbackground=TEXT)
 
         tk.Label(sec8, text="Result:", bg=BG, fg=GRAY,
@@ -802,7 +803,6 @@ class ADSetupWindow(tk.Toplevel):
 
     def _build_script(self) -> str:
         email    = self._email_var.get().strip()
-        password = self._pwd_var.get().strip()
         ou       = self._ou_var.get().strip()
         groups   = self._active_groups()
 
@@ -817,8 +817,6 @@ class ADSetupWindow(tk.Toplevel):
                 "The @tndmtrucking.com domain is retired. Use the employee's "
                 "@girteka.eu address."
             )
-        if not password:
-            raise ValueError("Password is required.")
         if not ou:
             raise ValueError("Target OU is required.\nEnter a buddy username and click 'Fetch OU + Groups'.")
         if not re.search(r"(?i)^(OU|CN|DC)=", ou):
@@ -830,25 +828,25 @@ class ADSetupWindow(tk.Toplevel):
         if self._scenario == "new_joiner":
             if not self._sf_account.get("username"):
                 raise ValueError("Temporary SF account was not detected. Search again before preparing changes.")
-            return build_new_joiner_script(self.ticket, self._sf_account, ou, email, password, groups, dept, ext_attrs)
+            return build_new_joiner_script(self.ticket, self._sf_account, ou, email, groups, dept, ext_attrs)
         elif self._scenario == "rejoiner_dual":
             if not self._sf_account.get("username") or not self._old_account.get("username"):
                 raise ValueError("Both the temporary SF account and previous account are required.")
             return build_rejoiner_dual_script(
-                self.ticket, self._sf_account, self._old_account, ou, email, password, groups, dept, ext_attrs)
+                self.ticket, self._sf_account, self._old_account, ou, email, groups, dept, ext_attrs)
         elif self._scenario == "rejoiner_single":
             account = self._old_account or (self._accounts[0] if self._accounts else {})
             if not account:
                 raise ValueError("No AD account is available for this rejoiner.")
             return build_rejoiner_single_script(
-                self.ticket, account, ou, email, password, groups, dept, ext_attrs)
+                self.ticket, account, ou, email, groups, dept, ext_attrs)
         else:
             raise ValueError(f"Scenario '{self._scenario}' requires manual review before changes can be prepared.")
 
     def _generate_preview(self):
         try:
-            self._script_box.delete("1.0", "end")
-            self._script_box.insert("1.0", self._build_script())
+            self._set_text(self._script_box, "")
+            self._set_text(self._script_box, self._build_script())
         except ValueError as e:
             messagebox.showwarning("Missing info", str(e), parent=self)
 
@@ -996,7 +994,7 @@ class ADSetupWindow(tk.Toplevel):
             "target_ou": self._ou_var.get().strip(),
             "groups_count": len(self._active_groups()),
             "phone": self.ticket.get("phone", ""),
-            "password": self._pwd_var.get().strip(),
+            "password": AD_SETUP_PASSWORD,
             "sms_template": self._sms_template(
                 self._username_var.get().strip(),
             ),

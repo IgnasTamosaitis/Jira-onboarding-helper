@@ -2,6 +2,35 @@
 
 ---
 
+## v1.6.2 - Restore required AD setup password
+
+Released 9 September 2026.
+
+- Restored `Welcome123` for every new-joiner and rejoiner AD setup
+- Removed random password generation and made the password and script review
+  read-only so the reset and saved handoff always use the required password
+
+---
+
+## v1.6.1 - Fix restart after automatic updates
+
+Released 7 September 2026.
+
+- Fixed the automatic restart after an MSI update, which could show
+  `Failed to load Python DLL` because the restarted app reused a temporary
+  Python folder that the previous process had already deleted
+- Added a regression test for the updater's inherited environment
+- Added recovery instructions: dismiss the error and reopen Jira Reminders
+  from the Start menu or Desktop shortcut
+
+For this update, close Jira Reminders from its tray menu, download
+`Jira-Reminders-1.6.1.msi`, and run it to upgrade the existing installation.
+Settings and saved tasks are preserved. An update started inside an older
+version may still need one manual reopen; the corrected updater takes effect
+once v1.6.1 is installed.
+
+---
+
 ## v1.6.0 - Girteka Dedicated and safer onboarding
 
 Released 4 September 2026.

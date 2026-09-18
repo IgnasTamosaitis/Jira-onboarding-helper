@@ -199,15 +199,15 @@ class GeneratedScriptTests(unittest.TestCase):
         scripts = [
             build_new_joiner_script(
                 ticket, self.SF_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Example#42", groups,
+                "Test.User@girteka.eu", groups,
             ),
             build_rejoiner_dual_script(
                 ticket, self.SF_ACCOUNT, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Example#42", groups,
+                "Test.User@girteka.eu", groups,
             ),
             build_rejoiner_single_script(
                 ticket, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Example#42", groups,
+                "Test.User@girteka.eu", groups,
             ),
         ]
         for script in scripts:
@@ -233,15 +233,15 @@ class GeneratedScriptTests(unittest.TestCase):
         scripts = [
             build_new_joiner_script(
                 ticket, self.SF_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Example#42", [],
+                "Test.User@girteka.eu", [],
             ),
             build_rejoiner_dual_script(
                 ticket, self.SF_ACCOUNT, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Example#42", [],
+                "Test.User@girteka.eu", [],
             ),
             build_rejoiner_single_script(
                 ticket, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Example#42", [],
+                "Test.User@girteka.eu", [],
             ),
         ]
         for script in scripts:
@@ -260,7 +260,7 @@ class GeneratedScriptTests(unittest.TestCase):
         }
         script = build_rejoiner_dual_script(
             ticket, self.SF_ACCOUNT, self.OLD_ACCOUNT, self.OU,
-            "Test.User@girteka.eu", "Example#42", [],
+            "Test.User@girteka.eu", [],
         )
         self.assertIn("$setParams['StreetAddress'] = $sf.StreetAddress", script)
         self.assertIn("$setParams['City'] = $sf.City", script)
@@ -278,7 +278,7 @@ class GeneratedScriptTests(unittest.TestCase):
         }
         script = build_rejoiner_single_script(
             ticket, self.OLD_ACCOUNT, self.OU,
-            "Test.User@girteka.eu", "Example#42", [],
+            "Test.User@girteka.eu", [],
         )
         self.assertIn(
             "EmailAddress -eq 'aliaksandra.krzysztofik@girteka.eu'",
@@ -294,7 +294,7 @@ class GeneratedScriptTests(unittest.TestCase):
         }
         script = build_rejoiner_single_script(
             ticket, self.OLD_ACCOUNT, self.OU,
-            "Test.User@girteka.eu", "Example#42", [],
+            "Test.User@girteka.eu", [],
         )
         self.assertIn("Remove addresses from TNDM's retired mail domain", script)
         self.assertIn("@tndmtrucking\\.com$", script)

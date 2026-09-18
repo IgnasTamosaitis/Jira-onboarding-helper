@@ -80,9 +80,10 @@ display name. This tab does not reserve card numbers or send jobs to a printer.
   joiner and rejoiner executions are also written to the local AD audit log.
 - Restricted AD groups are never copied or removed automatically.
 - Jira writes are limited to the explicit **Ask reporter** action.
-- A fresh random onboarding password is generated for each AD setup. It is
-  masked in the wizard, never saved in `tasks.json`, and stored for handoff in
-  Windows Credential Manager. Sensitive clipboard copies clear after 30 seconds.
+- Every new-joiner and rejoiner AD setup sets the password to `Welcome123`.
+  It is fixed and masked in the wizard, never saved in `tasks.json`, and stored
+  for handoff in Windows Credential Manager. Sensitive clipboard copies clear
+  after 30 seconds.
 - Jira and Snipe-IT API tokens are stored in Windows Credential Manager, not in
   repository files or local JSON configuration.
 
