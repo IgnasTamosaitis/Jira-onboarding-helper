@@ -15,9 +15,8 @@ from mover_ui import MoversPanel
 TASKS = [
     "Active Directory account setup",
     "Axapta account import/creation",
-    "Hardware preparation (laptop, phone, headphones)",
+    "AX user relations assignment",
     "Assign hardware & licenses in Snipe-IT",
-    "SIM card activation and assignment",
     "Physical access card creation",
 ]
 AD_TASK_INDEX = 0
@@ -1292,10 +1291,17 @@ class MainWindow(tk.Toplevel):
                 font=("Segoe UI", 12, "bold"),
             ).pack(anchor="w", fill="x")
             if password:
+                password_row = tk.Frame(account_frame, bg="#E7F4EC")
+                password_row.pack(fill="x", pady=(2, 0))
                 self._make_selectable_label(
-                    account_frame, f"Password: {password}", "#E7F4EC", TEXT,
+                    password_row, "Password: stored securely", "#E7F4EC", TEXT,
                     font=("Segoe UI", 10, "bold"),
-                ).pack(anchor="w", fill="x", pady=(2, 0))
+                ).pack(side="left", fill="x", expand=True)
+                self._make_btn(
+                    password_row, "Copy password",
+                    lambda text=password: self._copy_sensitive_to_clipboard(text),
+                    WHITE, GREEN,
+                ).pack(side="right", padx=(8, 0))
 
         details_frame = tk.Frame(box, bg="#E7F4EC")
         details_frame.pack(fill="x", padx=10, pady=(0, 8))
@@ -1335,7 +1341,7 @@ class MainWindow(tk.Toplevel):
             if sms_template:
                 self._make_btn(
                     action_row, "Copy message",
-                    lambda text=sms_template: self._copy_to_clipboard(text),
+                    lambda text=sms_template: self._copy_sensitive_to_clipboard(text),
                     WHITE, GREEN,
                 ).grid(row=0, column=action_col, sticky="e", padx=(8, 0))
 
@@ -1371,6 +1377,23 @@ class MainWindow(tk.Toplevel):
         self.clipboard_clear()
         self.clipboard_append(text or "")
         self._status.set("Copied to clipboard.")
+
+    def _copy_sensitive_to_clipboard(self, text: str):
+        self._copy_to_clipboard(text)
+        expected = text or ""
+        self.after(
+            30_000,
+            lambda expected=expected: self._clear_sensitive_clipboard(expected),
+        )
+        self._status.set("Copied to clipboard; it will be cleared after 30 seconds.")
+
+    def _clear_sensitive_clipboard(self, expected: str):
+        try:
+            if self.clipboard_get() == expected:
+                self.clipboard_clear()
+                self.clipboard_append("")
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _dedupe_repeated_country_code(phone: str) -> str:

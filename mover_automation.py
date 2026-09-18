@@ -4,10 +4,13 @@ import json
 import re
 
 from ad_automation import (
+    RETIRED_TNDM_EMAIL_DOMAIN,
     _e,
     detect_address_warning,
     detect_company_address,
     detect_site,
+    girteka_email_from_existing,
+    is_girteka_dedicated_company,
     run_ps,
 )
 from group_policy import is_blocked_group
@@ -188,6 +191,13 @@ def build_mover_plan(
     if not groups["desired"]:
         raise ValueError("The buddy has no copyable direct AD groups.")
 
+    # TNDM was migrated to Girteka Dedicated. Jira may still use either company
+    # name, but both now follow the Girteka email policy. Other mover email
+    # domains remain outside this workflow, as before.
+    email_target = ""
+    if is_girteka_dedicated_company(company):
+        email_target = girteka_email_from_existing(mover.get("email", ""))
+
     return {
         "ticket": ticket,
         "mover": mover,
@@ -199,6 +209,7 @@ def build_mover_plan(
         "company": company,
         "office": address.get("office") or new_office,
         "address": address,
+        "email_target": email_target,
         "groups": groups,
         "manager_mismatch": manager_mismatch,
         "axapta_notice": ticket.get("axapta_notice", ""),
@@ -221,6 +232,20 @@ def build_mover_script(plan: dict) -> str:
     manager_sam = _e(manager["sam"])
     original_groups = sorted(mover.get("groups", []), key=str.casefold)
     buddy_groups = sorted(buddy.get("groups", []), key=str.casefold)
+    email_target = (plan.get("email_target") or "").strip()
+    current_email = (mover.get("email") or "").strip()
+    mover_properties = (
+        "Enabled,DistinguishedName,MemberOf,Title,Description,Department,Company,"
+        "Office,StreetAddress,City,PostalCode,Country,Manager"
+    )
+    verify_properties = (
+        "DistinguishedName,Title,Description,Department,Company,Office,"
+        "StreetAddress,City,PostalCode,Country,Manager,MemberOf,"
+        "extensionAttribute10,extensionAttribute15"
+    )
+    if email_target:
+        mover_properties += ",EmailAddress,targetAddress,proxyAddresses"
+        verify_properties += ",EmailAddress,targetAddress,proxyAddresses"
 
     lines = [
         "$cred = Get-Credential -Message 'Enter your AD admin credentials'",
@@ -228,7 +253,7 @@ def build_mover_script(plan: dict) -> str:
         "Import-Module ActiveDirectory -ErrorAction Stop",
         "$dc = [string](Get-ADDomainController -Discover -Writable | Select-Object -ExpandProperty HostName)",
         "$PSDefaultParameterValues = @{'*-AD*:Credential' = $cred; '*-AD*:Server' = $dc}",
-        f"$mover = Get-ADUser -Identity '{sam}' -Properties Enabled,DistinguishedName,MemberOf,Title,Description,Department,Company,Office,StreetAddress,City,PostalCode,Country,Manager -ErrorAction Stop",
+        f"$mover = Get-ADUser -Identity '{sam}' -Properties {mover_properties} -ErrorAction Stop",
         f"$buddy = Get-ADUser -Identity '{buddy_sam}' -Properties Enabled,DistinguishedName,MemberOf,Department,Manager -ErrorAction Stop",
         f"$manager = Get-ADUser -Identity '{manager_sam}' -Properties Enabled,EmailAddress -ErrorAction Stop",
         "if (-not $mover.Enabled) { throw 'Mover account is disabled.' }",
@@ -256,6 +281,7 @@ def build_mover_script(plan: dict) -> str:
         'Write-Host "Office: $($mover.Office)"',
         'Write-Host "Address: $($mover.StreetAddress), $($mover.City), $($mover.PostalCode), $($mover.Country)"',
         'Write-Host "Manager DN: $($mover.Manager)"',
+        *(['Write-Host "Email: $($mover.EmailAddress)"'] if email_target else []),
         'Write-Host "Groups: $($currentGroups -join \' | \')"',
         "",
         "# Add desired memberships first, so the account never loses shared access mid-run.",
@@ -277,6 +303,38 @@ def build_mover_script(plan: dict) -> str:
             f"    $groupFailureMessages += ('ADD | ' + '{escaped_group}' + ' | ' + $_.Exception.Message)",
             f"    Write-Warning ('MANUAL GROUP FOLLOW-UP - could not add: ' + '{escaped_group}')",
             "}",
+        ]
+
+    if email_target:
+        retired_domain_pattern = RETIRED_TNDM_EMAIL_DOMAIN.replace(".", r"\.")
+        lines += [
+            "",
+            "# Apply Girteka email policy for TNDM / Girteka Dedicated movers.",
+            f"if ([string]$mover.EmailAddress -ne '{_e(current_email)}') {{ throw 'Mover email changed after preview. Refresh the plan.' }}",
+            f"$newEmail = '{_e(email_target)}'",
+            "$newPrimary = 'SMTP:' + $newEmail",
+            "$currentProxies = @($mover.proxyAddresses)",
+            "foreach ($addr in $currentProxies) {",
+            f"    if ($addr -imatch '^smtp:.+@{retired_domain_pattern}$') {{",
+            f"        Set-ADUser -Identity '{sam}' -Remove @{{proxyAddresses=$addr}} -ErrorAction Stop",
+            "        continue",
+            "    }",
+            "    if ($addr -ieq $newPrimary -and $addr -cne $newPrimary) {",
+            f"        Set-ADUser -Identity '{sam}' -Remove @{{proxyAddresses=$addr}} -ErrorAction Stop",
+            "        continue",
+            "    }",
+            "    if ($addr -cmatch '^SMTP:' -and $addr -cne $newPrimary) {",
+            "        $secondary = 'smtp:' + $addr.Substring(5)",
+            f"        Set-ADUser -Identity '{sam}' -Remove @{{proxyAddresses=$addr}} -ErrorAction Stop",
+            f"        Set-ADUser -Identity '{sam}' -Add @{{proxyAddresses=$secondary}} -ErrorAction Stop",
+            "    }",
+            "}",
+            f"$updatedProxies = @((Get-ADUser -Identity '{sam}' -Properties proxyAddresses).proxyAddresses)",
+            "if ($updatedProxies -cnotcontains $newPrimary) {",
+            f"    Set-ADUser -Identity '{sam}' -Add @{{proxyAddresses=$newPrimary}} -ErrorAction Stop",
+            "}",
+            f"Set-ADUser -Identity '{sam}' -EmailAddress $newEmail -Replace @{{targetAddress=$newEmail}} -ErrorAction Stop",
+            'Write-Host "OK  Girteka email and proxy addresses applied"',
         ]
 
     lines += [
@@ -348,7 +406,7 @@ def build_mover_script(plan: dict) -> str:
     desired = groups["desired"]
     lines += [
         "",
-        f"$verify = Get-ADUser -Identity '{sam}' -Properties DistinguishedName,Title,Description,Department,Company,Office,StreetAddress,City,PostalCode,Country,Manager,MemberOf,extensionAttribute10,extensionAttribute15",
+        f"$verify = Get-ADUser -Identity '{sam}' -Properties {verify_properties}",
         "$verifyGroups = @($verify.MemberOf | ForEach-Object { (Get-ADGroup -Identity $_).Name } | Sort-Object)",
         f"$ignoredGroups = @({_ps_array(groups['preserved_blocked'])} | Sort-Object)",
         "$verifyManagedGroups = @($verifyGroups | Where-Object { $ignoredGroups -notcontains $_ } | Sort-Object)",
@@ -368,8 +426,27 @@ def build_mover_script(plan: dict) -> str:
         'Write-Host "Department: $($verify.Department)"',
         'Write-Host "Company: $($verify.Company)"',
         'Write-Host "Office: $($verify.Office)"',
+        *(['Write-Host "Email: $($verify.EmailAddress)"'] if email_target else []),
         'Write-Host "Groups: $($verifyGroups -join \' | \')"',
     ]
+    if email_target:
+        retired_domain_pattern = RETIRED_TNDM_EMAIL_DOMAIN.replace(".", r"\.")
+        lines.insert(
+            -6,
+            f"if ([string]$verify.EmailAddress -ine '{_e(email_target)}') {{ throw 'Email verification failed.' }}",
+        )
+        lines.insert(
+            -6,
+            f"if ([string]$verify.targetAddress -ine '{_e(email_target)}') {{ throw 'Target address verification failed.' }}",
+        )
+        lines.insert(
+            -6,
+            f"if (@($verify.proxyAddresses | Where-Object {{ $_ -imatch '^smtp:.+@{retired_domain_pattern}$' }}).Count -ne 0) {{ throw 'Retired TNDM proxy verification failed.' }}",
+        )
+        lines.insert(
+            -6,
+            f"if (@($verify.proxyAddresses | Where-Object {{ $_ -ceq 'SMTP:{_e(email_target)}' }}).Count -ne 1) {{ throw 'Primary SMTP verification failed.' }}",
+        )
     for prop, key, label in (
         ("StreetAddress", "street", "Street address"),
         ("City", "city", "City"),
@@ -414,6 +491,11 @@ def format_mover_plan(plan: dict) -> str:
         f"Groups to remove ({len(groups['remove'])}): " + (", ".join(groups["remove"]) or "none"),
         f"Groups already correct ({len(groups['keep'])}): " + (", ".join(groups["keep"]) or "none"),
     ]
+    email_target = plan.get("email_target", "")
+    if email_target:
+        current_email = mover.get("email", "")
+        email_note = "already correct" if current_email.casefold() == email_target.casefold() else "update"
+        lines.insert(8, f"Email ({email_note}): {current_email}  ->  {email_target}")
     if groups["blocked_buddy"]:
         lines += [
             "",

@@ -7,7 +7,11 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 import webbrowser
 
-from ad_automation import find_user_accounts_by_name, run_ps
+from ad_automation import (
+    find_user_accounts_by_name,
+    is_girteka_dedicated_company,
+    run_ps,
+)
 from mover_automation import (
     build_mover_plan,
     build_mover_script,
@@ -487,10 +491,15 @@ class MoverADWindow(tk.Toplevel):
         tk.Label(overview, text="Review before applying", bg=WHITE, fg=TEXT,
                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
         effective = self.ticket.get("effective_date")
+        if is_girteka_dedicated_company(self.ticket.get("company_name", "")):
+            account_scope = (
+                "No password or UPN changes; Girteka Dedicated email is enforced"
+            )
+        else:
+            account_scope = "No password, email, UPN, or proxy-address changes"
         tk.Label(
             overview,
-            text=(f"Effective {effective or 'date not set'}   •   "
-                  "No password, email, UPN, or proxy-address changes"),
+            text=f"Effective {effective or 'date not set'}   •   {account_scope}",
             bg=WHITE, fg=GRAY, font=("Segoe UI", 8),
         ).pack(anchor="w", pady=(3, 0))
 

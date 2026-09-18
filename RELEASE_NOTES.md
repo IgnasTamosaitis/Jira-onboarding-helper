@@ -2,6 +2,26 @@
 
 ---
 
+## v1.6.0 - Girteka Dedicated and safer onboarding
+
+Released 4 September 2026.
+
+- Migrated TNDM onboarding to the standard Girteka email format and
+  `@girteka.eu` domain; both the old `TNDM` names and `Girteka Dedicated` are
+  recognised in joiner and mover tickets
+- Added targeted Girteka email/proxy alignment for movers into Girteka Dedicated
+  and cleanup of any remaining `@tndmtrucking.com` proxy addresses
+- Refined the onboarding checklist to five key tasks: removed Hardware
+  preparation and SIM assignment, added AX user relations assignment, and
+  preserved applicable completion state from older checklist layouts
+- Removed the standalone hardware deployment workflow; Snipe-IT integration is
+  now read-only and limited to showing assigned assets
+- Replaced the fixed onboarding password with a fresh random password per AD
+  setup and moved completed handoff passwords out of `tasks.json` into Windows
+  Credential Manager
+
+---
+
 ## v1.5.3 - Manual AD account fallback
 
 Released 21 August 2026.

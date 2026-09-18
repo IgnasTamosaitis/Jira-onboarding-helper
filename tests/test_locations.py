@@ -6,8 +6,10 @@ from ad_automation import (
     build_new_joiner_script,
     build_rejoiner_dual_script,
     build_rejoiner_single_script,
+    build_email,
     detect_address_warning,
     detect_company_address,
+    detect_domain,
     detect_location,
     detect_location_conflict,
     detect_site,
@@ -42,6 +44,7 @@ class LocationDetectionTests(unittest.TestCase):
                 "Willgrow, UAB",
                 "GCC, UAB",
                 "TNDM Trucking, UAB",
+                "Girteka Dedicated",
                 "Girteka Nordic, UAB",
                 "Girteka Transport, UAB",
                 "Girteka, UAB",
@@ -87,6 +90,23 @@ class LocationDetectionTests(unittest.TestCase):
         self.assertEqual(detect_location("Poznan Campus", "GoTrans"), "poland")
         self.assertEqual(detect_location("Tbilisi", "Girteka Business Services LLC"), "georgia")
         self.assertIn("PL Baze", DEFAULT_GROUPS["poland"])
+
+    def test_tndm_and_girteka_dedicated_use_girteka_onboarding_policy(self):
+        for company in ("TNDM", "TNDM Trucking, UAB", "Girteka Dedicated"):
+            with self.subTest(company=company):
+                self.assertEqual(detect_site("", company), "vilnius")
+                self.assertEqual(detect_location("", company), "lithuania")
+                self.assertEqual(detect_domain(company), "girteka.eu")
+                self.assertEqual(
+                    build_email("Test", "User", detect_domain(company)),
+                    "Test.User@girteka.eu",
+                )
+
+    def test_retired_tndm_domain_cannot_restore_the_old_email_pattern(self):
+        self.assertEqual(
+            build_email("Test", "User", "tndmtrucking.com"),
+            "Test.User@girteka.eu",
+        )
 
 
 class AddressMappingTests(unittest.TestCase):
@@ -179,15 +199,15 @@ class GeneratedScriptTests(unittest.TestCase):
         scripts = [
             build_new_joiner_script(
                 ticket, self.SF_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Welcome123", groups,
+                "Test.User@girteka.eu", "Example#42", groups,
             ),
             build_rejoiner_dual_script(
                 ticket, self.SF_ACCOUNT, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Welcome123", groups,
+                "Test.User@girteka.eu", "Example#42", groups,
             ),
             build_rejoiner_single_script(
                 ticket, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Welcome123", groups,
+                "Test.User@girteka.eu", "Example#42", groups,
             ),
         ]
         for script in scripts:
@@ -213,15 +233,15 @@ class GeneratedScriptTests(unittest.TestCase):
         scripts = [
             build_new_joiner_script(
                 ticket, self.SF_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Welcome123", [],
+                "Test.User@girteka.eu", "Example#42", [],
             ),
             build_rejoiner_dual_script(
                 ticket, self.SF_ACCOUNT, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Welcome123", [],
+                "Test.User@girteka.eu", "Example#42", [],
             ),
             build_rejoiner_single_script(
                 ticket, self.OLD_ACCOUNT, self.OU,
-                "Test.User@girteka.eu", "Welcome123", [],
+                "Test.User@girteka.eu", "Example#42", [],
             ),
         ]
         for script in scripts:
@@ -240,7 +260,7 @@ class GeneratedScriptTests(unittest.TestCase):
         }
         script = build_rejoiner_dual_script(
             ticket, self.SF_ACCOUNT, self.OLD_ACCOUNT, self.OU,
-            "Test.User@girteka.eu", "Welcome123", [],
+            "Test.User@girteka.eu", "Example#42", [],
         )
         self.assertIn("$setParams['StreetAddress'] = $sf.StreetAddress", script)
         self.assertIn("$setParams['City'] = $sf.City", script)
@@ -258,12 +278,26 @@ class GeneratedScriptTests(unittest.TestCase):
         }
         script = build_rejoiner_single_script(
             ticket, self.OLD_ACCOUNT, self.OU,
-            "Test.User@girteka.eu", "Welcome123", [],
+            "Test.User@girteka.eu", "Example#42", [],
         )
         self.assertIn(
             "EmailAddress -eq 'aliaksandra.krzysztofik@girteka.eu'",
             script,
         )
+
+    def test_rejoiner_cleanup_removes_retired_tndm_proxy_addresses(self):
+        ticket = {
+            "office": "Girteka Park",
+            "company_name": "TNDM",
+            "manager": "Test Manager",
+            "position": "Tester",
+        }
+        script = build_rejoiner_single_script(
+            ticket, self.OLD_ACCOUNT, self.OU,
+            "Test.User@girteka.eu", "Example#42", [],
+        )
+        self.assertIn("Remove addresses from TNDM's retired mail domain", script)
+        self.assertIn("@tndmtrucking\\.com$", script)
 
     def test_default_jql_remains_scoped_to_current_user(self):
         ui_source = (Path(__file__).parents[1] / "ui.py").read_text(encoding="utf-8")
