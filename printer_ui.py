@@ -222,5 +222,41 @@ class PrinterPanel(tk.Frame):
         self._status.set(f"Card image saved to {output_path}")
 
     @staticmethod
+    def _load_font(filename, size):
+        font_path = Path("C:/Windows/Fonts") / filename
+        if font_path.exists():
+            return ImageFont.truetype(str(font_path), size)
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _draw_spaced_name(draw, card, font, lines, scale_x, scale_y):
+        if not lines:
+            return
+        spacing = NAME_LETTER_SPACING * scale_x
+        line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+        start_y = PREVIEW_HEIGHT * 0.59 * scale_y
+        for line_number, line in enumerate(lines):
+            widths = [draw.textlength(character, font=font) for character in line]
+            line_width = sum(widths) + max(0, len(line) - 1) * spacing
+            x = (card.width - line_width) / 2
+            for character, character_width in zip(line, widths):
+                draw.text((x, start_y + line_number * line_height), character,
+                          font=font, fill="#0B5669")
+                x += character_width + spacing
+
+    @staticmethod
     def _validate_number(value):
-        return re.fullmatch(r"[0-9]{0,4}", value) is not None
+        return value == "" or (len(value) <= 4 and value.isascii() and value.isdigit())
+
+
+def main():
+    root = tk.Tk()
+    root.title("Access Card Printer")
+    root.geometry("820x380")
+    root.minsize(760, 340)
+    PrinterPanel(root).pack(fill="both", expand=True)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
