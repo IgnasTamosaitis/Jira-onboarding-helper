@@ -51,7 +51,7 @@ Released 24 September 2026.
 
 Download `Jira-Reminders-1.7.0.msi` from this release, or use **Check for updates**.
 The installer upgrades existing installations and preserves settings and tasks.
-The required AD setup password remains `Welcome123`.
+The required AD setup password is unchanged.
 
 Card automation needs a separately deployed and acceptance-tested tenant flow;
 the MSI does not deploy it. Follow the [OneDrive sync guide](docs/ACCESS_CARD_ONEDRIVE_FLOW.md),
@@ -70,7 +70,7 @@ authentication, AD execution, live verification, and stored completion state.
 
 Released 9 September 2026.
 
-- Restored `Welcome123` for every new-joiner and rejoiner AD setup
+- Restored the required onboarding password for every new-joiner and rejoiner AD setup
 - Removed random password generation and made the password and script review
   read-only so the reset and saved handoff always use the required password
 

@@ -272,7 +272,7 @@ the `@girteka.eu` domain during onboarding.
 - Tokens are not written to `config.json`.
 - Snipe-IT access is read-only and is used only to display assets already
   assigned to a joiner.
-- Each joiner/rejoiner AD setup uses the required fixed password `Welcome123`.
+- Each joiner/rejoiner AD setup uses the required onboarding password.
   Completed handoff passwords are stored in Windows Credential Manager, not in
   `tasks.json` or its new backups.
 - Passwords are masked in the AD wizard and sensitive clipboard copies clear

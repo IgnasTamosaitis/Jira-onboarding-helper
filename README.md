@@ -125,8 +125,8 @@ connections remain available for separately provisioned deployments.
   deleting setup history. New setups save the full baseline for future comparisons.
 - Restricted AD groups are never copied or removed automatically.
 - Jira writes are limited to the explicit **Ask reporter** action.
-- Every new-joiner and rejoiner AD setup sets the password to `Welcome123`.
-  It is fixed and masked in the wizard, never saved in `tasks.json`, and stored
+- Every new-joiner and rejoiner AD setup uses the required onboarding password.
+  It is masked in the wizard, never saved in `tasks.json`, and stored
   for handoff in Windows Credential Manager. Sensitive clipboard copies clear
   after 30 seconds.
 - Jira and Snipe-IT API tokens are stored in Windows Credential Manager, not in
