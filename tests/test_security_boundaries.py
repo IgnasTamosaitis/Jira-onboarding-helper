@@ -11,6 +11,7 @@ from ad_automation import (
 )
 from ad_ui import ADSetupWindow
 from snipeit_client import SnipeITClient
+from access_card_registry import PowerAutomateAccessCardClient
 
 
 class PasswordSafetyTests(unittest.TestCase):
@@ -113,6 +114,14 @@ class SnipeITReadOnlyTests(unittest.TestCase):
         self.assertIsNone(
             re.search(r"\.\s*(post|put|patch|delete)\s*\(", source, re.IGNORECASE)
         )
+
+
+class AccessCardAllocationSafetyTests(unittest.TestCase):
+    def test_desktop_client_contains_no_local_next_number_calculation(self):
+        source = inspect.getsource(PowerAutomateAccessCardClient)
+
+        self.assertNotIn("max(", source)
+        self.assertNotIn("numeric_part + 1", source)
 
 
 if __name__ == "__main__":

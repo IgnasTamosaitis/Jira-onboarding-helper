@@ -4,6 +4,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -178,6 +179,7 @@ class TaskStorage:
     def __init__(self):
         self._data: dict = _load(TASKS_FILE)
         self._session_ad_passwords: dict[str, str] = {}
+        self._ad_live_verified: dict[str, float] = {}
         self._migrate_legacy_ad_passwords()
         self._migrate_task_schema()
 
@@ -294,10 +296,76 @@ class TaskStorage:
             self._session_ad_passwords[ticket_id] = password
             _save_ad_password(ticket_id, password)
         self._data[f"__ad_setup_{ticket_id}"] = safe_info
+        if safe_info.get("baseline") and safe_info.get("verified") and safe_info.get("status") == "Completed":
+            self._ad_live_verified[ticket_id] = time.monotonic()
         _save(TASKS_FILE, self._data)
 
     def ad_setup_done(self, ticket_id: str) -> bool:
-        return bool(self.get_ad_setup(ticket_id).get("completed_at"))
+        info = self._data.get(f"__ad_setup_{ticket_id}", {})
+        if not isinstance(info, dict):
+            return False
+        if info.get("scenario") == "mover":
+            return bool(info.get("completed_at"))
+        checked = self._ad_live_verified.get(ticket_id)
+        return checked is not None and time.monotonic() - checked < 120
+
+    def update_ad_verification(self, ticket_id: str, info: dict, result: dict) -> None:
+        """Keep historical evidence; only a fresh live check drives completion."""
+        record = dict(info)
+        record.pop("password", None)
+        record.update(live_check=result, verified=bool(result.get("verified")))
+        self._data[f"__ad_setup_{ticket_id}"] = record
+        completed = bool(result.get("completed", result.get("verified")))
+        if completed:
+            self._ad_live_verified[ticket_id] = time.monotonic()
+        else:
+            self._ad_live_verified.pop(ticket_id, None)
+        state = self.get(ticket_id)
+        state[0] = completed
+        self._data[ticket_id] = state
+        _save(TASKS_FILE, self._data)
+
+    def mark_ad_setup_incomplete(self, ticket_id: str, status: str) -> None:
+        """A failed retry must not leave a previous AD completion badge/checkmark."""
+        record = dict(self._data.get(f"__ad_setup_{ticket_id}", {}))
+        self._ad_live_verified.pop(ticket_id, None)
+        if record.get("baseline"):
+            record["previous_baseline"] = record.pop("baseline")
+        record.pop("live_check", None)
+        record.pop("completed_at", None)
+        record.update(status=status, verified=False,
+                      attempted_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
+        self._data[f"__ad_setup_{ticket_id}"] = record
+        state = self.get(ticket_id)
+        state[0] = False
+        self._data[ticket_id] = state
+        _save(TASKS_FILE, self._data)
+
+    # ── Access-card registry result ──────────────────────────────────────────
+
+    def get_access_card(self, ticket_id: str) -> dict:
+        raw = self._data.get(f"__access_card_{ticket_id}", {})
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def mark_access_card(self, ticket_id: str, result: dict) -> None:
+        """Cache a server-confirmed result; the workbook remains authoritative."""
+        allowed = {
+            "status",
+            "jira_key",
+            "full_name",
+            "card_id",
+            "numeric_part",
+            "message",
+            "workbook_changed",
+            "is_confirmed",
+            "registry_name",
+            "joiner_type",
+            "registry_source",
+        }
+        safe_result = {key: result.get(key) for key in allowed if key in result}
+        safe_result["checked_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        self._data[f"__access_card_{ticket_id}"] = safe_result
+        _save(TASKS_FILE, self._data)
 
     # ── Per-ticket daily notification dedup ───────────────────────────────────
 

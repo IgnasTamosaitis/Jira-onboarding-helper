@@ -10,6 +10,7 @@ Scenarios detected by searching AD by first+last name:
   rejoiner_single - one account, NOT in SF_OU (disabled or already active)
   unknown         - unexpected state, needs manual review
 """
+import json
 import os
 import re
 import subprocess
@@ -18,6 +19,9 @@ import unicodedata
 from html import unescape
 
 from group_policy import is_blocked_group
+from ad_setup_execution import (
+    role_preflight_lines, apply_role_lines, verification_lines, success_lines,
+)
 
 SF_OU_FRAGMENT = "Active_Users_from_SF"   # substring present in the SF provisioning OU
 # Required onboarding password for every new-joiner and rejoiner AD setup.
@@ -104,8 +108,9 @@ def _proxy_address_lines(sam: str, email: str) -> list[str]:
         '    Write-Host "OK  proxyAddresses already present"',
         "}",
         "",
-        "# Ensure girteka.lt proxy address is lowercase smtp (secondary only)",
-        "$ltUpper = $currentProxies | Where-Object { $_ -cmatch '^SMTP:.+@girteka\\.lt$' }",
+        "# Demote every other primary SMTP address to a secondary alias",
+        f"$currentProxies = @((Get-ADUser -Identity '{sam}' -Properties proxyAddresses).proxyAddresses)",
+        "$ltUpper = $currentProxies | Where-Object { $_ -cmatch '^SMTP:' -and $_ -cne $smtpAddress }",
         "foreach ($addr in $ltUpper) {",
         f"    $lower = 'smtp:' + $addr.Substring(5)",
         f"    Set-ADUser -Identity '{sam}' -Remove @{{proxyAddresses=$addr}}",
@@ -151,10 +156,12 @@ def _set_user_attribute_lines(sam: str, email: str, title: str,
     L.append("}")
     if manager:
         L.append("if ($mgrDn) { $setParams['Manager'] = $mgrDn }")
+    L += apply_role_lines()
     L += [
         f"Set-ADUser -Identity '{sam}' @setParams",
         'Write-Host "OK  Attributes updated"',
         "if ($mgrEmail) {",
+        "    $expected['extensionAttribute10'] = $mgrEmail",
         f"    Set-ADUser -Identity '{sam}' -Replace @{{extensionAttribute10=$mgrEmail}}",
         '    Write-Host "OK  extensionAttribute10 set to $mgrEmail"',
         "} else {",
@@ -164,11 +171,13 @@ def _set_user_attribute_lines(sam: str, email: str, title: str,
     ext15 = addr.get("ext15", "") if addr else ""
     if ext15:
         L += [
+            f"$expected['extensionAttribute15'] = '{_e(ext15)}'",
             f"Set-ADUser -Identity '{sam}' -Replace @{{extensionAttribute15='{_e(ext15)}'}}",
             f'Write-Host "OK  extensionAttribute15 set to {ext15}"',
         ]
     else:
         L += [
+            "$expected['extensionAttribute15'] = ''",
             f"Set-ADUser -Identity '{sam}' -Clear extensionAttribute15",
             'Write-Host "OK  extensionAttribute15 cleared"',
         ]
@@ -412,6 +421,9 @@ def run_ps(script: str, timeout: int = 90) -> tuple[str, str, int]:
         "[Console]::InputEncoding = [System.Text.Encoding]::UTF8;\n"
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n"
         "$OutputEncoding = [System.Text.Encoding]::UTF8;\n"
+        # Windows PowerShell must load its own security cmdlets even when the
+        # desktop app was launched from PowerShell 7 with an inherited module path.
+        "Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop;\n"
         + script
     )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -453,6 +465,26 @@ def run_ps(script: str, timeout: int = 90) -> tuple[str, str, int]:
                 os.remove(script_path)
             except FileNotFoundError:
                 pass
+
+
+def get_current_user_site() -> str:
+    """Read the operator's own AD office; unknown or unavailable offices stay unknown."""
+    script = """
+$ErrorActionPreference = 'Stop'
+Import-Module ActiveDirectory -ErrorAction Stop
+$operatorSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$operator = Get-ADUser -Identity $operatorSid -Properties Office -ErrorAction Stop
+[pscustomobject]@{office = [string]$operator.Office} | ConvertTo-Json -Compress
+"""
+    try:
+        stdout, _stderr, code = run_ps(script, timeout=10)
+        if code != 0:
+            return ""
+        result = json.loads(stdout)
+        office = result.get("office") if isinstance(result, dict) else None
+        return detect_site(office) if isinstance(office, str) else ""
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return ""
 
 
 def sam_exists(sam: str) -> bool:
@@ -793,7 +825,8 @@ def build_ext_attr_lines(sam: str, ext_attrs: dict) -> list[str]:
     pairs = "; ".join(f"{k}='{_e(v)}'" for k, v in ext_attrs.items() if v)
     if not pairs:
         return []
-    return [
+    expected = [f"$expected['{k}'] = '{_e(v)}'" for k, v in ext_attrs.items() if v]
+    return expected + [
         "# Set extended attributes from buddy",
         f"Set-ADUser -Identity '{sam}' -Replace @{{{pairs}}}",
         'Write-Host "OK  Extended attributes set"',
@@ -814,9 +847,11 @@ def _group_add_lines(sam: str, groups: list[str]) -> list[str]:
             f"    $groupName = '{group_e}'",
             "    $targetGroups = @(Get-ADGroup -Filter { Name -eq $groupName } -ErrorAction Stop)",
             "    if ($targetGroups.Count -ne 1) { throw \"Expected one AD group named '$groupName'; found $($targetGroups.Count).\" }",
+            "    $expectedGroups += $targetGroups[0].DistinguishedName",
             f"    Add-ADGroupMember -Identity $targetGroups[0].DistinguishedName -Members '{sam_e}' -ErrorAction Stop",
             f"    Write-Host 'OK  Added group: {group_e}'",
             "} catch {",
+            f"    $groupFailures += ('Group ' + '{group_e}' + ': ' + $_.Exception.Message)",
             f"    Write-Warning ('Group ' + '{group_e}' + ': ' + $_.Exception.Message)",
             "}",
         ]
@@ -856,12 +891,11 @@ def _password_reset_lines(sam: str) -> list[str]:
 
 def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
                              email: str, groups: list[str],
-                             department: str = "", ext_attrs: dict = None) -> str:
+                             department: str = "", ext_attrs: dict = None,
+                             buddy_sam: str = "") -> str:
     """
-    New joiner: SF already sets Title, Description, Department, Company, Office,
-    StreetAddress, Manager, EmployeeID, extensionAttribute5, extensionAttribute15.
-    We only fill the gaps: OU move, groups, email, City/PostalCode/Country,
-    extensionAttribute10 (manager email), extensionAttribute14 (buddy), password.
+    Configure an existing SF account. Preserve its populated role attributes;
+    use the loaded buddy only for missing fields. Verify before recording success.
     """
     username = _e(sf_account["username"])
     address  = detect_company_address(
@@ -871,6 +905,7 @@ def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
 
     L = [
         "$cred = Get-Credential -Message 'Enter your AD admin credentials'",
+        "if (-not $cred) { throw 'Administrator sign-in cancelled; no changes applied.' }",
         '$ErrorActionPreference = "Stop"',
         "Import-Module ActiveDirectory -ErrorAction Stop",
         "$dc = [string](Get-ADDomainController -Discover -Writable | Select-Object -ExpandProperty HostName)",
@@ -879,6 +914,15 @@ def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
         "",
         f'Write-Host "Processing NEW JOINER: {sf_account["username"]}"',
         "",
+        f"$source = Get-ADUser -Identity '{username}' -Properties Title,Description,Department,Company,Office,Manager,EmployeeID,DirectReports",
+    ]
+    L += role_preflight_lines("$source", buddy_sam, department=department)
+    L += [
+        "$expectedReports = @($source.DirectReports)",
+        "$expected['Company'] = $source.Company",
+        "$expected['Office'] = $source.Office",
+        "$expected['EmployeeID'] = $source.EmployeeID",
+        "$expected['Manager'] = $source.Manager",
         "# Resolve manager email from SF account's Manager DN (SF already set this correctly)",
         f"$sfMgrDn = (Get-ADUser -Identity '{username}' -Properties Manager).Manager",
         "$mgrEmail = $null",
@@ -890,24 +934,25 @@ def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
         '        Write-Warning "Could not get manager email: $_"',
         "    }",
         "}",
+        "if (-not $sfMgrDn -or [string]::IsNullOrWhiteSpace($mgrEmail)) { throw 'Manager or manager email is missing; no changes applied.' }",
+        "if (-not $source.Company -or -not $source.Office) { throw 'SF company or office is missing; no changes applied.' }",
         "",
         "# Move account from SF OU to correct OU",
         f"$userDN = (Get-ADUser -Identity '{username}' -Properties DistinguishedName).DistinguishedName",
         f"Move-ADObject -Identity $userDN -TargetPath '{_e(target_ou)}'",
         'Write-Host "OK  Account moved to correct OU"',
         "",
-        "# Add to AD groups (failures logged but non-fatal)",
+        "# Attempt selected groups; group failures are advisory",
     ]
     L += _group_add_lines(sf_account["username"], groups)
-    L += ['Write-Host "OK  Groups assigned"', ""]
+    L += ['Write-Host "Group assignment attempts finished"', ""]
 
     L += _password_reset_lines(sf_account["username"])
 
     L += _proxy_address_lines(username, email)
 
-    # Only set what SF leaves blank
     L += [
-        "# Set email and location fields (SF does not provision these)",
+        "# Set email, location and validated SF role fields (buddy fallback for blanks)",
         "$setParams = @{",
         f"    EmailAddress = '{_e(email)}'",
     ]
@@ -919,11 +964,15 @@ def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
         L.append(f"    Country = '{_e(address['country'])}'")
     L += [
         "}",
+    ]
+    L += apply_role_lines()
+    L += [
         f"Set-ADUser -Identity '{username}' @setParams",
         'Write-Host "OK  Email and location set"',
         "",
         "# Set manager email in extensionAttribute10",
         "if ($mgrEmail) {",
+        "    $expected['extensionAttribute10'] = $mgrEmail",
         f"    Set-ADUser -Identity '{username}' -Replace @{{extensionAttribute10=$mgrEmail}}",
         '    Write-Host "OK  extensionAttribute10 set to $mgrEmail"',
         "} else {",
@@ -935,23 +984,25 @@ def build_new_joiner_script(ticket: dict, sf_account: dict, target_ou: str,
     ea14 = (ext_attrs or {}).get("extensionAttribute14", "")
     if ea14:
         L += [
+            f"$expected['extensionAttribute14'] = '{_e(ea14)}'",
             f"Set-ADUser -Identity '{username}' -Replace @{{extensionAttribute14='{_e(ea14)}'}}",
             'Write-Host "OK  extensionAttribute14 set"',
             "",
         ]
 
+    L += verification_lines(sf_account["username"], target_ou, email)
+    L += success_lines(sf_account["username"])
     return "\n".join(L)
 
 
 def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict,
                                 target_ou: str, email: str,
                                 groups: list[str], department: str = "",
-                                ext_attrs: dict = None) -> str:
+                                ext_attrs: dict = None, buddy_sam: str = "") -> str:
     """
     Rejoiner with two accounts.
-    SF dummy already has correct new employment data (Title, Description, Department,
-    Company, Manager, extensionAttribute5, extensionAttribute15) — read directly from it.
-    We fill the rest: email, location, extensionAttribute10/14, groups, password.
+    Preserve SF employment data, filling only missing role fields from the buddy.
+    Transfer SF reporting references and verify before deleting the duplicate.
     """
     sf_sam  = _e(sf_account["username"])
     sf_identity = _e(sf_account.get("dn") or sf_account["username"])
@@ -965,6 +1016,7 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
 
     L = [
         "$cred = Get-Credential -Message 'Enter your AD admin credentials'",
+        "if (-not $cred) { throw 'Administrator sign-in cancelled; no changes applied.' }",
         '$ErrorActionPreference = "Stop"',
         "Import-Module ActiveDirectory -ErrorAction Stop",
         "$dc = [string](Get-ADDomainController -Discover -Writable | Select-Object -ExpandProperty HostName)",
@@ -975,9 +1027,20 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
         "",
         "# Read all new employment data from SF dummy",
         f"$sfDN = '{sf_identity}'",
-        "$sf = Get-ADUser -Identity $sfDN -Properties EmployeeID,Title,Description,Department,Company,Manager,Office,StreetAddress,City,PostalCode,Country,extensionAttribute5",
+        "$sf = Get-ADUser -Identity $sfDN -Properties EmployeeID,Title,Description,Department,Company,Manager,Office,StreetAddress,City,PostalCode,Country,extensionAttribute5,DirectReports",
         'Write-Host "SF data loaded — EmpID: $($sf.EmployeeID)  Title: $($sf.Title)"',
         "",
+        f"$original = Get-ADUser -Identity '{old_sam}' -Properties DirectReports",
+        "if ($sf.ObjectGUID -eq $original.ObjectGUID) { throw 'SF and restored accounts must be different.' }",
+        "if (-not $sf.EmployeeID -or -not $sf.Company) { throw 'SF employee ID or company is missing; no changes applied.' }",
+        "if ($sf.Manager -eq $sf.DistinguishedName -or $sf.Manager -eq $original.DistinguishedName) { throw 'Invalid manager on SF account; no changes applied.' }",
+        "if ($original.DistinguishedName -in $sf.DirectReports) { throw 'The restored account reports to its SF duplicate; resolve before retrying.' }",
+    ]
+    L += role_preflight_lines("$sf", buddy_sam, department=department)
+    L += [
+        "$expected['EmployeeID'] = $sf.EmployeeID",
+        "$expectedReports = @($original.DirectReports) + @($sf.DirectReports)",
+        "$sfReports = @($sf.DirectReports | ForEach-Object { Get-ADUser -Identity $_ -Properties Manager })",
         "# Resolve manager email from SF dummy manager DN",
         "$mgrEmail = $null",
         "if ($sf.Manager) {",
@@ -988,6 +1051,7 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
         '        Write-Warning "Could not get manager email: $_"',
         "    }",
         "}",
+        "if (-not $sf.Manager -or [string]::IsNullOrWhiteSpace($mgrEmail)) { throw 'Manager or manager email is missing; no changes applied.' }",
         "",
         "# Copy EmployeeID to old account",
         f"Set-ADUser -Identity '{old_sam}' -EmployeeID $sf.EmployeeID",
@@ -1007,7 +1071,7 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
         "# Add to AD groups",
     ]
     L += _group_add_lines(old_account["username"], groups)
-    L += ['Write-Host "OK  Groups assigned"', ""]
+    L += ['Write-Host "Group assignment attempts finished"', ""]
 
     L += _password_reset_lines(old_account["username"])
 
@@ -1019,7 +1083,7 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
         "$setParams = @{",
         f"    EmailAddress  = '{_e(email)}'",
         "    Title         = $sf.Title",
-        "    Description   = $sf.Title",
+        "    Description   = $sf.Description",
         "    Department    = $sf.Department",
         "    Company       = $sf.Company",
     ]
@@ -1051,17 +1115,22 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
             )
     L += [
         "if ($sf.Manager) { $setParams['Manager'] = $sf.Manager }",
+    ]
+    L += apply_role_lines()
+    L += [
         f"Set-ADUser -Identity '{old_sam}' @setParams",
         'Write-Host "OK  Attributes updated"',
         "",
         "# Copy extensionAttribute5 from SF dummy (org hierarchy)",
         "if ($sf.extensionAttribute5) {",
+        "    $expected['extensionAttribute5'] = $sf.extensionAttribute5",
         f"    Set-ADUser -Identity '{old_sam}' -Replace @{{extensionAttribute5=$sf.extensionAttribute5}}",
         '    Write-Host "OK  extensionAttribute5: $($sf.extensionAttribute5)"',
         "}",
         "",
         "# Set extensionAttribute10 (manager email)",
         "if ($mgrEmail) {",
+        "    $expected['extensionAttribute10'] = $mgrEmail",
         f"    Set-ADUser -Identity '{old_sam}' -Replace @{{extensionAttribute10=$mgrEmail}}",
         '    Write-Host "OK  extensionAttribute10 set to $mgrEmail"',
         "} else {",
@@ -1072,6 +1141,7 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
 
     if ea14:
         L += [
+            f"$expected['extensionAttribute14'] = '{ea14}'",
             f"Set-ADUser -Identity '{old_sam}' -Replace @{{extensionAttribute14='{ea14}'}}",
             'Write-Host "OK  extensionAttribute14 set"',
             "",
@@ -1079,28 +1149,50 @@ def build_rejoiner_dual_script(ticket: dict, sf_account: dict, old_account: dict
 
     if ext15:
         L += [
+            f"$expected['extensionAttribute15'] = '{_e(ext15)}'",
             f"Set-ADUser -Identity '{old_sam}' -Replace @{{extensionAttribute15='{_e(ext15)}'}}",
             f'Write-Host "OK  extensionAttribute15 set to {ext15}"',
             "",
         ]
     else:
         L += [
+            "$expected['extensionAttribute15'] = ''",
             f"Set-ADUser -Identity '{old_sam}' -Clear extensionAttribute15",
             'Write-Host "OK  extensionAttribute15 cleared"',
             "",
         ]
 
     L += [
-        "# !! DELETE SF DUMMY ACCOUNT - verify above output before this runs !!",
-        "Remove-ADUser -Identity $sfDN -Confirm:$false",
+        "# Preserve reporting links to this employee before deleting the SF duplicate",
+        f"$restoredDN = (Get-ADUser -Identity '{old_sam}').DistinguishedName",
+        "foreach ($report in $sfReports) {",
+        "    $currentReport = Get-ADUser -Identity $report.ObjectGUID -Properties Manager",
+        "    if ($currentReport.Manager -ne $sf.DistinguishedName) { throw 'SF reporting links changed during setup; duplicate retained.' }",
+        f"    Set-ADUser -Identity $report.ObjectGUID -Manager $restoredDN -Replace @{{extensionAttribute10='{_e(email)}'}}",
+        "    $reportCheck = Get-ADUser -Identity $report.ObjectGUID -Properties Manager,extensionAttribute10",
+        f"    if ($reportCheck.Manager -ine $restoredDN -or $reportCheck.extensionAttribute10 -ine '{_e(email)}') {{ throw 'SF reporting link verification failed; duplicate retained.' }}",
+        "}",
+    ]
+    L += verification_lines(old_account["username"], target_ou, email)
+    L += [
+        "# Delete only after account and membership verification passes",
+        "$sourceFields = @('EmployeeID','Title','Description','Department','Company','Manager','Office','StreetAddress','City','PostalCode','Country','extensionAttribute5')",
+        "$sfCurrent = Get-ADUser -Identity $sf.ObjectGUID -Properties ($sourceFields + @('DirectReports'))",
+        "if (@($sfCurrent.DirectReports).Count) { throw 'SF account still has direct reports; duplicate retained.' }",
+        "foreach ($field in $sourceFields) {",
+        '    if ([string]$sfCurrent.$field -cne [string]$sf.$field) { throw "SF data changed during setup: $field. Duplicate retained." }',
+        "}",
+        "Remove-ADUser -Identity $sf.ObjectGUID -Confirm:$false",
         'Write-Host "OK  SF dummy account deleted"',
     ]
+    L += success_lines(old_account["username"])
     return "\n".join(L)
 
 
 def build_rejoiner_single_script(ticket: dict, account: dict, target_ou: str,
                                   email: str, groups: list[str],
-                                  department: str = "", ext_attrs: dict = None) -> str:
+                                  department: str = "", ext_attrs: dict = None,
+                                  buddy_sam: str = "") -> str:
     """
     Rejoiner with only one account (no SF duplicate).
     Steps: move if needed -> enable if needed -> clear hide flag -> groups -> attributes -> password.
@@ -1114,6 +1206,7 @@ def build_rejoiner_single_script(ticket: dict, account: dict, target_ou: str,
 
     L = [
         "$cred = Get-Credential -Message 'Enter your AD admin credentials'",
+        "if (-not $cred) { throw 'Administrator sign-in cancelled; no changes applied.' }",
         '$ErrorActionPreference = "Stop"',
         "Import-Module ActiveDirectory -ErrorAction Stop",
         "$dc = [string](Get-ADDomainController -Discover -Writable | Select-Object -ExpandProperty HostName)",
@@ -1125,8 +1218,12 @@ def build_rejoiner_single_script(ticket: dict, account: dict, target_ou: str,
     ]
 
     L += _manager_lookup_lines(manager)
-
+    L += [f"$source = Get-ADUser -Identity '{sam}' -Properties Title,Description,Department,Manager,DirectReports"]
+    L += role_preflight_lines("$source", buddy_sam, ticket.get("position", ""), department,
+                              sf_authoritative=False)
     L += [
+        "$expectedReports = @($source.DirectReports)",
+        "if (-not $mgrDn -or [string]::IsNullOrWhiteSpace($mgrEmail)) { throw 'Manager or manager email could not be resolved; no changes applied.' }",
         f"$acct = Get-ADUser -Identity '{sam}' -Properties DistinguishedName,Enabled",
         "$currentOu = $acct.DistinguishedName -replace '^CN=[^,]+,', ''",
         f"if ($currentOu -ne '{_e(target_ou)}') {{",
@@ -1147,11 +1244,13 @@ def build_rejoiner_single_script(ticket: dict, account: dict, target_ou: str,
         "# Add to AD groups",
     ]
     L += _group_add_lines(account["username"], groups)
-    L += ['Write-Host "OK  Groups assigned"', ""]
+    L += ['Write-Host "Group assignment attempts finished"', ""]
 
     L += _password_reset_lines(account["username"])
 
     L += _proxy_address_lines(sam, email)
     L += _set_user_attribute_lines(sam, email, title, office, manager, _e(company), address, department)
     L += build_ext_attr_lines(sam, ext_attrs or {})
+    L += verification_lines(account["username"], target_ou, email)
+    L += success_lines(account["username"])
     return "\n".join(L)

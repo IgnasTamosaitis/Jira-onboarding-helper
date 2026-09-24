@@ -24,6 +24,8 @@ htmlcov/
 config.json
 tasks.json
 ad_audit.log
+power-automate-token-cache.bin*
+sharepoint-token-cache.bin*
 
 # Claude Code local settings
 .claude/

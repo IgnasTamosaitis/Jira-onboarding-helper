@@ -91,6 +91,8 @@ $pyInstallerArgs = @(
     "--workpath", (Join-Path $buildRoot "pyinstaller"),
     "--specpath", $buildRoot,
     "--hidden-import", "keyring.backends.Windows",
+    "--hidden-import", "msal_extensions",
+    "--hidden-import", "msal_extensions.persistence",
     "--hidden-import", "plyer.platforms.win.notification",
     "--hidden-import", "pystray._win32",
     (Join-Path $repoRoot "app.py")

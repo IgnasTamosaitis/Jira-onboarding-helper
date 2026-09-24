@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "requestKey": { "type": "string", "pattern": "^card-v1-[0-9a-f]{64}$" },
+    "jiraKey": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*-[1-9][0-9]*$" },
+    "fullName": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "joinerType": { "type": "string", "enum": ["new_joiner", "rejoiner"] }
+  },
+  "required": ["requestKey", "jiraKey", "fullName", "joinerType"],
+  "additionalProperties": false
+}

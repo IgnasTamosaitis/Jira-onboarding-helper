@@ -27,3 +27,18 @@ jobs:
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
+      - name: Set up Node.js
+        # Keep the workbook tests independent of the runner's default Node version.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Office Script test compiler
+        run: npm.cmd install --prefix .tools/typescript-check --no-save --package-lock=false typescript@5.9.2
+
+      - name: Type-check Office Script
+        run: node .tools/typescript-check/node_modules/typescript/bin/tsc --noEmit --strict --target ES2020 tests/office_scripts.d.ts power_automate/ReserveAccessCard.ts
+
+      - name: Test workbook reservations
+        run: node --test tests/test_access_card_script.cjs

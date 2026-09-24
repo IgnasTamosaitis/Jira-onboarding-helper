@@ -3,6 +3,8 @@ Jira New Joiner Reminders
 Runs in the system tray, polls Jira, and sends Windows notifications.
 """
 import sys
+import hashlib
+import json
 import queue
 import threading
 import time
@@ -12,7 +14,19 @@ from datetime import date, datetime, timedelta
 import pystray
 from PIL import Image, ImageDraw
 
+from ad_automation import get_current_user_site
+from access_card_registry import (
+    AccessCardAuthenticationRequired,
+    AccessCardError,
+    AccessCardPending,
+    PowerAutomateAccessCardClient,
+    cached_reservation_for_ticket,
+    reservation_request_from_ticket,
+)
 from jira_client import DEFAULT_MOVER_JQL, JiraClient
+from power_automate_auth import PowerAutomateAuthenticator
+from sharepoint_card_queue import SharePointAccessCardClient
+from onedrive_card_queue import OneDriveAccessCardClient
 from snipeit_client import SnipeITClient
 from storage import TaskStorage, load_config, save_config
 from ui import MainWindow, SetupDialog, TASKS
@@ -66,7 +80,12 @@ class App:
         self._config: dict = {}
         self._tray: pystray.Icon | None = None
         self._snipeit: SnipeITClient | None = None
+        self._access_card_client: PowerAutomateAccessCardClient | SharePointAccessCardClient | OneDriveAccessCardClient | None = None
+        self._access_card_source = ""
+        self._access_card_worker_lock = threading.Lock()
         self._pending_update: dict | None = None
+        self._card_printer_enabled = False
+        self._operator_office_check_lock = threading.Lock()
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
@@ -106,6 +125,7 @@ class App:
         # Launch with the main ticket window visible while keeping the app rooted in the tray.
         self._root.after(0, self._show_window)
         self._root.after(100, self._drain_ui_queue)
+        self._root.after(15000, self._poll_pending_access_cards)
         self._root.mainloop()
 
     def _apply_config(self, cfg: dict) -> None:
@@ -114,6 +134,49 @@ class App:
         snipeit_url   = cfg.get("snipeit_url", "").strip()
         snipeit_token = cfg.get("snipeit_token", "").strip()
         self._snipeit = SnipeITClient(snipeit_url, snipeit_token) if snipeit_url and snipeit_token else None
+        self._access_card_client = None
+        flow_url = cfg.get("access_card_flow_url", "").strip()
+        site_url = cfg.get("access_card_site_url", "").strip().rstrip("/")
+        list_id = cfg.get("access_card_list_id", "").strip()
+        sync_folder = cfg.get("access_card_sync_folder", "").strip()
+        tenant_id = cfg.get("access_card_tenant_id", "").strip()
+        client_id = cfg.get("access_card_client_id", "").strip()
+        previous_source = self._access_card_source
+        source_values = [flow_url, site_url, list_id, tenant_id]
+        if sync_folder:
+            try:
+                self._access_card_client = OneDriveAccessCardClient(sync_folder)
+                source_values = ["onedrive", str(self._access_card_client.root)]
+            except AccessCardError as exc:
+                source_values = ["onedrive", sync_folder]
+                print(f"[access cards] folder connection disabled: {exc}")
+        elif (flow_url or site_url) and tenant_id and client_id:
+            try:
+                if site_url:
+                    if flow_url:
+                        raise AccessCardError("Choose either the SharePoint list or the Premium HTTP flow.")
+                    authenticator = PowerAutomateAuthenticator(tenant_id, client_id, service="sharepoint")
+                    self._access_card_client = SharePointAccessCardClient(site_url, list_id, authenticator)
+                else:
+                    authenticator = PowerAutomateAuthenticator(tenant_id, client_id)
+                    self._access_card_client = PowerAutomateAccessCardClient(flow_url, authenticator)
+            except AccessCardError as exc:
+                print(f"[access cards] configuration disabled: {exc}")
+        self._access_card_source = hashlib.sha256(json.dumps(
+            source_values, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+        if self._window:
+            self._window.set_card_registry_message(self._card_registry_message())
+        if previous_source != self._access_card_source:
+            with self._tickets_lock:
+                for ticket in self._tickets:
+                    for field in ("access_card", "access_card_error", "access_card_pending"):
+                        ticket.pop(field, None)
+                refreshed = list(self._tickets)
+            self._ui_queue.put(("update_tickets", refreshed))
+
+    def _card_registry_message(self) -> str:
+        return "" if self._access_card_client else "Connect the Excel card registry in Settings, then refresh."
 
     # ── Background polling ────────────────────────────────────────────────────
 
@@ -127,15 +190,18 @@ class App:
     def _fetch_and_notify(self) -> None:
         if not self._jira:
             return
+        self._start_operator_office_check()
         try:
             tickets = self._jira.get_new_joiner_tickets(
                 self._config.get("jql", ""),
                 self._config.get("date_field", "customfield_10980"),
             )
+            self._attach_cached_access_cards(tickets)
             with self._tickets_lock:
                 self._tickets = tickets
             self._ui_queue.put(("update_tickets", tickets))
             self._send_per_ticket_notifications(tickets)
+            self._start_access_card_reservations(tickets)
         except Exception as e:
             print(f"[poll joiners] {e}")
         try:
@@ -148,6 +214,127 @@ class App:
             self._send_mover_notifications(movers)
         except Exception as e:
             print(f"[poll movers] {e}")
+
+    def _start_operator_office_check(self) -> None:
+        if not self._operator_office_check_lock.acquire(blocking=False):
+            return
+        threading.Thread(target=self._check_operator_office, daemon=True).start()
+
+    def _check_operator_office(self) -> None:
+        try:
+            try:
+                site = get_current_user_site()
+            except Exception:
+                site = ""
+            self._ui_queue.put(("operator_office", site))
+        finally:
+            self._operator_office_check_lock.release()
+
+    def _attach_cached_access_cards(self, tickets: list[dict]) -> None:
+        for ticket in tickets:
+            cached = self._storage.get_access_card(str(ticket.get("id", "")))
+            if self._cached_card_matches_source(cached) and cached_reservation_for_ticket(ticket, cached):
+                ticket["access_card"] = cached
+            else:
+                ticket.pop("access_card", None)
+
+    def _cached_card_matches_source(self, cached: dict) -> bool:
+        return cached.get("registry_source", "") == getattr(self, "_access_card_source", "")
+
+    def _poll_pending_access_cards(self) -> None:
+        """Poll only queued work; ordinary Jira refresh still submits new requests."""
+        if isinstance(self._access_card_client, (SharePointAccessCardClient, OneDriveAccessCardClient)):
+            with self._tickets_lock:
+                pending = [dict(ticket) for ticket in self._tickets if ticket.get("access_card_pending")]
+            self._start_access_card_reservations(pending)
+        self._root.after(15000, self._poll_pending_access_cards)
+
+    def _start_access_card_reservations(self, tickets: list[dict]) -> None:
+        if not self._access_card_client or not self._card_printer_enabled:
+            return
+        snapshot = [dict(ticket) for ticket in tickets if ticket.get("kind", "joiner") == "joiner"]
+        if not snapshot:
+            return
+        if not self._access_card_worker_lock.acquire(blocking=False):
+            return
+        threading.Thread(
+            target=self._reserve_access_cards,
+            args=(snapshot,),
+            daemon=True,
+        ).start()
+
+    def _reserve_access_cards(self, tickets: list[dict]) -> None:
+        """Resolve pending card IDs without delaying Jira or the main window."""
+        try:
+            client = self._access_card_client
+            source = getattr(self, "_access_card_source", "")
+            if not client:
+                return
+            changed = False
+            for ticket in tickets:
+                if client is not self._access_card_client or not self._card_printer_enabled:
+                    break
+                if ticket.get("kind", "joiner") != "joiner":
+                    continue
+                ticket_id = str(ticket.get("id", ""))
+                cached = self._storage.get_access_card(ticket_id)
+                confirmed = cached_reservation_for_ticket(ticket, cached) if self._cached_card_matches_source(cached) else None
+                if confirmed and confirmed.is_confirmed:
+                    ticket["access_card"] = cached
+                    ticket.pop("access_card_error", None)
+                    ticket.pop("access_card_pending", None)
+                    changed = True
+                    continue
+                try:
+                    ticket.pop("access_card", None)
+                    ticket.pop("access_card_pending", None)
+                    request = reservation_request_from_ticket(ticket)
+                    result = client.reserve_for_ticket(ticket, interactive=False)
+                except AccessCardPending as exc:
+                    ticket["access_card_error"] = str(exc)
+                    ticket["access_card_pending"] = True
+                    changed = True
+                    continue
+                except AccessCardAuthenticationRequired as exc:
+                    ticket["access_card_error"] = "Sign in to the access-card service in Settings, then refresh."
+                    changed = True
+                    continue
+                except AccessCardError as exc:
+                    ticket["access_card_error"] = str(exc)
+                    changed = True
+                    continue
+
+                stored_result = result.as_dict()
+                stored_result["joiner_type"] = request["joinerType"]
+                stored_result["registry_source"] = source
+                if client is not self._access_card_client or source != getattr(self, "_access_card_source", ""):
+                    break
+                self._storage.mark_access_card(ticket_id, stored_result)
+                ticket["access_card"] = stored_result
+                ticket.pop("access_card_error", None)
+                changed = True
+
+            if changed and client is self._access_card_client and source == getattr(self, "_access_card_source", ""):
+                with self._tickets_lock:
+                    current_by_id = {
+                        str(ticket.get("id", "")): ticket for ticket in self._tickets
+                    }
+                    for ticket in tickets:
+                        if "access_card" in ticket or "access_card_error" in ticket:
+                            current = current_by_id.get(str(ticket.get("id", "")))
+                            if current is not None:
+                                identity_fields = ("key", "name", "first_name", "last_name", "rejoiner", "ad_joiner_scenario", "kind")
+                                if any(current.get(field) != ticket.get(field) for field in identity_fields):
+                                    continue
+                                for field in ("access_card", "access_card_error", "access_card_pending"):
+                                    if field in ticket:
+                                        current[field] = ticket[field]
+                                    else:
+                                        current.pop(field, None)
+                    refreshed = list(self._tickets)
+                self._ui_queue.put(("update_tickets", refreshed))
+        finally:
+            self._access_card_worker_lock.release()
 
     def _send_per_ticket_notifications(self, tickets: list[dict]) -> None:
         today  = date.today()
@@ -213,6 +400,7 @@ class App:
                     self._config.get("jql", ""),
                     self._config.get("date_field", "customfield_10980"),
                 )
+                self._attach_cached_access_cards(tickets)
                 movers = self._jira.get_mover_tickets(
                     self._config.get("mover_jql", DEFAULT_MOVER_JQL)
                 )
@@ -221,6 +409,7 @@ class App:
                     self._movers = movers
                 self._ui_queue.put(("update_tickets", tickets))
                 self._ui_queue.put(("update_movers", movers))
+                self._start_access_card_reservations(tickets)
             except Exception:
                 pass
 
@@ -368,6 +557,14 @@ class App:
                     self._window.update_tickets(args[0])
                 elif cmd == "update_movers" and self._window:
                     self._window.update_movers(args[0])
+                elif cmd == "operator_office":
+                    self._card_printer_enabled = args[0] == "vilnius"
+                    if self._window:
+                        self._window.set_card_printer_visible(self._card_printer_enabled)
+                    if self._card_printer_enabled:
+                        with self._tickets_lock:
+                            tickets = list(self._tickets)
+                        self._start_access_card_reservations(tickets)
                 elif cmd == "open_settings":
                     self._open_settings()
                 elif cmd == "update_available":
@@ -394,6 +591,8 @@ class App:
             on_refresh=self._manual_refresh,
             snipeit=self._snipeit,
             movers=self._movers,
+            card_printer_enabled=self._card_printer_enabled,
+            card_registry_message=self._card_registry_message(),
         )
         self._window.lift()
         self._window.focus_force()

@@ -14,11 +14,12 @@ from ad_automation import (
     AD_SETUP_PASSWORD,
     find_user_accounts, find_user_account_by_username,
     select_new_joiner_account, classify_scenario,
-    get_buddy_info, get_account_groups, build_verification_script,
+    get_buddy_info, get_account_groups,
     build_new_joiner_script, build_rejoiner_dual_script,
     build_rejoiner_single_script, run_ps,
 )
 from group_policy import is_blocked_group, is_redundant_group, is_restricted_group
+from ad_setup_execution import setup_result_status
 
 BG     = "#F7F8FA"
 WHITE  = "#FFFFFF"
@@ -125,6 +126,7 @@ class ADSetupWindow(tk.Toplevel):
 
         # Buddy department and extended attributes (fetched alongside groups)
         self._buddy_department: str = ""
+        self._loaded_buddy_sam: str = ""
         self._buddy_ext_attrs: dict = {}
         self._ext_attr_vars: dict[str, tk.BooleanVar] = {}
         self._stale_group_vars: dict[str, tk.BooleanVar] = {}
@@ -637,7 +639,11 @@ class ADSetupWindow(tk.Toplevel):
                     if err:
                         self._buddy_status.config(text=f"Error: {err}", fg=RED)
                         return
+                    if sam.casefold() != self._buddy_var.get().strip().casefold():
+                        self._buddy_status.config(text="Buddy changed while loading. Fetch again.", fg=ORANGE)
+                        return
                     self._ou_var.set(ou)
+                    self._loaded_buddy_sam = sam
                     self._buddy_department = department
                     self._buddy_ext_attrs = ext_attrs
                     dept_hint = f"  (dept: {department})" if department else ""
@@ -823,23 +829,26 @@ class ADSetupWindow(tk.Toplevel):
             raise ValueError(f"Target OU does not look like a valid Distinguished Name:\n{ou}")
 
         dept = self._buddy_department
+        buddy_sam = self._buddy_var.get().strip()
+        if buddy_sam.casefold() != self._loaded_buddy_sam.casefold():
+            raise ValueError("Fetch the selected buddy's OU and groups before preparing changes.")
         ext_attrs = {attr: self._buddy_ext_attrs.get(attr, "")
                      for attr, var in self._ext_attr_vars.items() if var.get()}
         if self._scenario == "new_joiner":
             if not self._sf_account.get("username"):
                 raise ValueError("Temporary SF account was not detected. Search again before preparing changes.")
-            return build_new_joiner_script(self.ticket, self._sf_account, ou, email, groups, dept, ext_attrs)
+            return build_new_joiner_script(self.ticket, self._sf_account, ou, email, groups, dept, ext_attrs, buddy_sam)
         elif self._scenario == "rejoiner_dual":
             if not self._sf_account.get("username") or not self._old_account.get("username"):
                 raise ValueError("Both the temporary SF account and previous account are required.")
             return build_rejoiner_dual_script(
-                self.ticket, self._sf_account, self._old_account, ou, email, groups, dept, ext_attrs)
+                self.ticket, self._sf_account, self._old_account, ou, email, groups, dept, ext_attrs, buddy_sam)
         elif self._scenario == "rejoiner_single":
             account = self._old_account or (self._accounts[0] if self._accounts else {})
             if not account:
                 raise ValueError("No AD account is available for this rejoiner.")
             return build_rejoiner_single_script(
-                self.ticket, account, ou, email, groups, dept, ext_attrs)
+                self.ticket, account, ou, email, groups, dept, ext_attrs, buddy_sam)
         else:
             raise ValueError(f"Scenario '{self._scenario}' requires manual review before changes can be prepared.")
 
@@ -866,9 +875,9 @@ class ADSetupWindow(tk.Toplevel):
 
     def _run_script(self):
         try:
-            script = self._script_box.get("1.0", "end-1c").strip()
-            if not script:
-                script = self._build_script()
+            # Rebuild from the current selections so an older preview cannot run.
+            script = self._build_script().strip()
+            self._set_text(self._script_box, script)
         except ValueError as e:
             messagebox.showwarning("Missing info", str(e), parent=self)
             return
@@ -881,6 +890,7 @@ class ADSetupWindow(tk.Toplevel):
             return
 
         started = datetime.now()
+        account = self._username_var.get().strip()
         self._run_status.config(text="In progress", fg=ORANGE)
         self._set_text(self._output_box, f"[{started:%Y-%m-%d %H:%M:%S}] Applying changes...")
         self._show_busy("Applying Changes", "Applying Active Directory changes. Please wait...")
@@ -889,16 +899,18 @@ class ADSetupWindow(tk.Toplevel):
             try:
                 out, err, code = run_ps(script, timeout=120)
                 finished = datetime.now()
-                status = "Completed" if code == 0 and not err else ("Not completed" if code != 0 else "Completed with notes")
+                status = setup_result_status(out, err, code, account)
                 result = f"[{finished:%Y-%m-%d %H:%M:%S}] {status}\n\n"
                 result += out
                 if err:
                     result += f"\n\n--- Details ---\n{err}"
                 if code != 0:
                     result += f"\n\nResult code: {code}"
+                elif status != "Completed":
+                    result += "\n\nSetup was not verified successfully. Review the output before retrying."
                 self.after(0, lambda: self._apply_run_result(status, result or "(no output)"))
             except Exception as e:
-                self.after(0, lambda: self._handle_async_error("Apply changes failed", str(e)))
+                self.after(0, lambda error=str(e): self._apply_run_result("Not completed", error))
         threading.Thread(target=_do, daemon=True).start()
 
     def _build_safety_summary(self) -> str:
@@ -932,29 +944,18 @@ class ADSetupWindow(tk.Toplevel):
         self._run_status.config(text=status, fg=color)
         self._set_text(self._output_box, text)
         self._write_audit_log(status, text)
-        if status != "Not completed":
+        if status == "Completed":
+            from ad_setup_status import readback_from_output
+            self._verified_baseline = readback_from_output(
+                text, self._username_var.get().strip()).get("baseline", {})
             self._mark_setup_completed(status)
-        sam = self._username_var.get().strip()
-        if sam:
-            self._show_busy("Verifying Changes", "Checking the updated account in Active Directory...")
-            self._run_status.config(text=f"{status}  —  verifying...", fg=color)
-            threading.Thread(target=self._run_verification, args=(sam, text, color), daemon=True).start()
-        else:
-            self._hide_busy()
-
-    def _run_verification(self, sam: str, existing_output: str, color: str):
-        try:
-            out, err, _ = run_ps(build_verification_script(sam), timeout=30)
-            verification = out or err or "Verification returned no output."
-            full = existing_output + "\n\n─────────────────────────────\n" + verification
-            def _update():
-                self._hide_busy()
-                self._set_text(self._output_box, full)
-                self._run_status.config(
-                    text=self._run_status.cget("text").replace("  —  verifying...", ""), fg=color)
-            self.after(0, _update)
-        except Exception as e:
-            self.after(0, lambda: self._handle_async_error("Verification failed", str(e)))
+        elif self.storage:
+            self.storage.mark_ad_setup_incomplete(self.ticket["id"], status)
+            if self.on_completed:
+                self.after(0, self.on_completed)
+        # The execution script now verifies using its original DC and credentials.
+        # Its read-back output is already included in the audit log above.
+        self._hide_busy()
 
     def _remove_stale_groups(self):
         selected = [g for g, v in self._stale_group_vars.items() if v.get()]
@@ -983,16 +984,18 @@ class ADSetupWindow(tk.Toplevel):
         messagebox.showinfo("Group removal result", result or "Done.", parent=self)
 
     def _mark_setup_completed(self, status: str):
-        if not self.storage:
+        if not self.storage or status != "Completed":
             return
         info = {
             "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "status": status,
+            "verified": True,
             "scenario": self._scenario,
             "account": self._username_var.get().strip(),
             "email": self._email_var.get().strip(),
             "target_ou": self._ou_var.get().strip(),
-            "groups_count": len(self._active_groups()),
+            "groups_count": len(getattr(self, "_verified_baseline", {}).get("groups", self._active_groups())),
+            "baseline": getattr(self, "_verified_baseline", {}),
             "phone": self.ticket.get("phone", ""),
             "password": AD_SETUP_PASSWORD,
             "sms_template": self._sms_template(

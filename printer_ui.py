@@ -5,9 +5,11 @@ from pathlib import Path
 import re
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+from access_card_registry import AccessCardError, cached_reservation_for_ticket, reservation_request_from_ticket
 
 
 BG = "#F7F8FA"
@@ -94,7 +96,7 @@ def render_card(background: Image.Image, full_name: str, number: str) -> Image.I
 class PrinterPanel(tk.Frame):
     """Two-pane card form with a live preview of the exported image."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, tickets=None, on_refresh=None, registry_message=""):
         super().__init__(parent, bg=BG)
         self.full_name = tk.StringVar(self)
         self.number = tk.StringVar(self)
@@ -102,7 +104,17 @@ class PrinterPanel(tk.Frame):
         self._background = None
         self._card_image = None
         self._preview_image = None
+        self._managed = tickets is not None
+        self._tickets = []
+        self._selected_ticket_id = ""
+        self._selected_result = None
+        self._selection_message = "Select a joiner or rejoiner."
+        self._registry_message = registry_message
+        self._ticket_choice = tk.StringVar(self)
+        self._on_refresh = on_refresh
         self._build()
+        if self._managed:
+            self.update_tickets(tickets)
 
     def _build(self):
         bottom = tk.Frame(self, bg="#EEF2F7", height=46)
@@ -129,6 +141,14 @@ class PrinterPanel(tk.Frame):
 
         form = tk.Frame(left, bg=WHITE)
         form.pack(fill="x", padx=14, pady=4)
+        if self._managed:
+            tk.Label(form, text="Joiner / rejoiner", bg=WHITE, fg=TEXT,
+                     font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x", pady=(8, 3))
+            self._ticket_selector = ttk.Combobox(
+                form, textvariable=self._ticket_choice, state="readonly", font=("Segoe UI", 9),
+            )
+            self._ticket_selector.pack(fill="x", pady=(0, 5))
+            self._ticket_selector.bind("<<ComboboxSelected>>", self._on_ticket_selected)
         number_validate = (self.register(self._validate_number), "%P")
         for label, variable in (("Full name", self.full_name), ("Number (after LT)", self.number)):
             tk.Label(form, text=label, bg=WHITE, fg=TEXT,
@@ -140,11 +160,17 @@ class PrinterPanel(tk.Frame):
             )
             if variable is self.number:
                 entry.configure(validate="key", validatecommand=number_validate)
+            if self._managed:
+                entry.configure(state="readonly", readonlybackground=WHITE)
             entry.pack(fill="x", ipady=5)
         tk.Label(
-            form, text="Enter an existing card number. Export the image, then open it in your card-printing software.",
+            form, text=("Select a joiner or rejoiner. The name and card number are filled from Excel."
+                        if self._managed else "Enter an existing card number. Export the image, then open it in your card-printing software."),
             bg=WHITE, fg=GRAY, font=("Segoe UI", 9), wraplength=285, justify="left",
         ).pack(fill="x", pady=14)
+        if self._managed and self._on_refresh:
+            tk.Button(form, text="Refresh card details", command=self._on_refresh,
+                      bg=WHITE, fg=ACCENT, relief="flat", font=("Segoe UI", 9)).pack(anchor="w")
 
         right = tk.Frame(body, bg=BG)
         right.pack(side="left", fill="both", expand=True)
@@ -173,8 +199,71 @@ class PrinterPanel(tk.Frame):
             variable.trace_add("write", self._update_preview)
         self._update_preview()
 
+    def update_tickets(self, tickets):
+        self._tickets = [ticket for ticket in tickets if ticket.get("kind", "joiner") == "joiner"]
+        labels = []
+        for ticket in self._tickets:
+            try:
+                request = reservation_request_from_ticket(ticket)
+                name = request["fullName"]
+                kind = "Rejoiner" if request["joinerType"] == "rejoiner" else "New joiner"
+            except AccessCardError:
+                name, kind = ticket.get("name", ""), "Check Jira details"
+            labels.append(f"{ticket.get('key', '')} · {name} · {kind}")
+        self._ticket_selector.configure(values=labels)
+        ids = [str(ticket.get("id", "")) for ticket in self._tickets]
+        selected = self._selected_ticket_id if self._selected_ticket_id in ids else ""
+        if not selected and len(ids) == 1:
+            selected = ids[0]
+        self.select_ticket(selected)
+
+    def set_registry_message(self, message):
+        self._registry_message = message
+        self.select_ticket(self._selected_ticket_id)
+
+    def _on_ticket_selected(self, _event=None):
+        index = self._ticket_selector.current()
+        if 0 <= index < len(self._tickets):
+            self.select_ticket(str(self._tickets[index].get("id", "")))
+
+    def select_ticket(self, ticket_id):
+        self._selected_ticket_id = str(ticket_id or "")
+        self._selected_result = None
+        self._selection_message = "Select a joiner or rejoiner." if self._tickets else "No assigned joiners or rejoiners."
+        self.full_name.set("")
+        self.number.set("")
+        self._ticket_choice.set("")
+        for index, ticket in enumerate(self._tickets):
+            if str(ticket.get("id", "")) != self._selected_ticket_id:
+                continue
+            self._ticket_selector.current(index)
+            try:
+                request = reservation_request_from_ticket(ticket)
+                self.full_name.set(request["fullName"])
+                result = cached_reservation_for_ticket(ticket, ticket.get("access_card"))
+                if result and result.is_confirmed:
+                    self._selected_result = result
+                    self.full_name.set(result.print_name)
+                    self.number.set(str(result.numeric_part))
+                    self._selection_message = f"{result.card_id} · {result.message}"
+                else:
+                    self._selection_message = (result.message if result else
+                        ticket.get("access_card_error") or self._registry_message or "Looking up the card in Excel…")
+            except AccessCardError as error:
+                self._selection_message = str(error)
+            break
+        self._update_preview()
+
+    def _has_verified_card(self):
+        result = self._selected_result
+        return (result is not None and result.is_confirmed
+                and self.full_name.get() == result.print_name
+                and self.number.get() == str(result.numeric_part))
+
     def _update_preview(self, *_args):
         self._card_image = None
+        if self._background is None:
+            return
         try:
             number = self.number.get().strip()
             if not self._validate_number(number):
@@ -190,11 +279,16 @@ class PrinterPanel(tk.Frame):
             card.resize((PREVIEW_WIDTH, PREVIEW_HEIGHT), Image.Resampling.LANCZOS), master=self,
         )
         self._preview_label.configure(image=self._preview_image, text="")
-        self._export_button.configure(state="normal")
-        self._status.set("Ready to export." if self.full_name.get().strip() and number
+        allowed = not self._managed or self._has_verified_card()
+        self._export_button.configure(state="normal" if allowed else "disabled")
+        self._status.set(self._selection_message if self._managed else
+                         "Ready to export." if self.full_name.get().strip() and number
                          else "Enter the card details on the left.")
 
     def _submit(self):
+        if self._managed and not self._has_verified_card():
+            self._status.set("Wait for a confirmed Excel card record before exporting.")
+            return
         name = " ".join(self.full_name.get().split())
         number = self.number.get().strip()
         if not name or not number:

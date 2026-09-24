@@ -1,14 +1,18 @@
 import re
 import subprocess
 import threading
+import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
+import os
 import webbrowser
 from datetime import date
 import unicodedata
 
 from jira_client import DEFAULT_MOVER_JQL, extract_buddies_from_comments, is_sam_account
 from ad_automation import find_user_accounts, classify_scenario
+from access_card_registry import AccessCardConfigurationError
+from ad_setup_status import check_setup, recover_setup
 from mover_ui import MoversPanel
 from printer_ui import PrinterPanel
 
@@ -41,7 +45,8 @@ PRIORITY_COMPANY_COLOR = RED
 
 class MainWindow(tk.Toplevel):
     def __init__(self, parent, tickets: list, storage, jira_client, on_refresh,
-                 snipeit=None, movers: list | None = None):
+                 snipeit=None, movers: list | None = None,
+                 card_printer_enabled: bool = False, card_registry_message: str = ""):
         super().__init__(parent)
         self.tickets   = tickets
         self.storage   = storage
@@ -67,11 +72,18 @@ class MainWindow(tk.Toplevel):
         self._manual_buddies: set = set()        # ticket_ids with a persisted manual buddy
         self._dismissed_buddy_names: dict = {}   # ticket_id -> display name of cleared buddy
         self._ad_joiner_checks: set = set()      # ticket_ids with in-flight AD joiner-type checks
+        self._ad_status_checks: dict = {}
+        self._ad_status_times: dict = {}
+        self._ad_status_job = None
         self._load_manual_buddies()
         self._load_dismissed_buddies()
         self._snipeit = snipeit
         self.movers = movers or []
         self._movers_panel: MoversPanel | None = None
+        self._card_printer_enabled = card_printer_enabled
+        self._printer_tab: tk.Frame | None = None
+        self._printer_panel: PrinterPanel | None = None
+        self._card_registry_message = card_registry_message
 
         self.title("ITSD Jira Helper")
         self.geometry("980x620")
@@ -101,20 +113,41 @@ class MainWindow(tk.Toplevel):
         style.configure("Main.TNotebook", background=BG, borderwidth=0, tabmargins=(12, 8, 0, 0))
         style.configure("Main.TNotebook.Tab", font=("Segoe UI", 9, "bold"), padding=(18, 8))
         notebook = ttk.Notebook(self._main_frame, style="Main.TNotebook")
+        self._notebook = notebook
         joiners_tab = tk.Frame(notebook, bg=BG)
         movers_tab = tk.Frame(notebook, bg=BG)
-        printer_tab = tk.Frame(notebook, bg=BG)
         notebook.add(joiners_tab, text="  New joiners  ")
         notebook.add(movers_tab, text="  Movers  ")
-        notebook.add(printer_tab, text="  Card printer  ")
         self._build_joiners_tab(joiners_tab)
         self._movers_panel = MoversPanel(
             movers_tab, self.movers, self.storage, self.jira, self.on_refresh
         )
         self._movers_panel.pack(fill="both", expand=True)
-        PrinterPanel(printer_tab).pack(fill="both", expand=True)
+        self.set_card_printer_visible(self._card_printer_enabled)
         notebook.pack(fill="both", expand=True)
         self._main_frame.pack(fill="both", expand=True)
+
+    def set_card_printer_visible(self, enabled: bool) -> None:
+        """Apply the operator's AD office check without rebuilding their ticket views."""
+        if enabled is True:
+            if self._printer_tab is None:
+                self._printer_tab = tk.Frame(self._notebook, bg=BG)
+                self._printer_panel = PrinterPanel(
+                    self._printer_tab, tickets=self.tickets, on_refresh=self.on_refresh,
+                    registry_message=self._card_registry_message,
+                )
+                self._printer_panel.pack(fill="both", expand=True)
+                if self._selected_ticket_id:
+                    self._printer_panel.select_ticket(self._selected_ticket_id)
+            self._notebook.add(self._printer_tab, text="  Card printer  ")
+        elif self._printer_tab is not None:
+            if str(self._printer_tab) in self._notebook.tabs():
+                self._notebook.forget(self._printer_tab)
+
+    def set_card_registry_message(self, message: str) -> None:
+        self._card_registry_message = message
+        if self._printer_panel:
+            self._printer_panel.set_registry_message(message)
 
     def show_update_banner(self, version: str, on_install) -> None:
         if getattr(self, "_update_banner", None):
@@ -229,6 +262,7 @@ class MainWindow(tk.Toplevel):
         self._listbox.delete(0, "end")
         today = date.today()
         for i, t in enumerate(self.tickets):
+            self._sync_ad_task(t["id"])
             done  = self.storage.completed_count(t["id"], len(TASKS))
             sd    = t["start_date"]
             color = TEXT  # default - more than 7 days away or no date
@@ -271,6 +305,8 @@ class MainWindow(tk.Toplevel):
         self._save_current_notes()
         self._sel = sel[0]
         self._selected_ticket_id = self.tickets[self._sel]["id"]
+        if self._printer_panel:
+            self._printer_panel.select_ticket(self._selected_ticket_id)
         self._show_detail(self.tickets[self._sel])
         self._update_ad_button()
 
@@ -365,6 +401,10 @@ class MainWindow(tk.Toplevel):
 
     def _show_detail(self, t: dict):
         self._save_current_notes()
+        self._ensure_ad_status_check(t)
+        if self._ad_status_job:
+            self.after_cancel(self._ad_status_job)
+        self._ad_status_job = self.after(60000, lambda: self._refresh_selected_ad(t))
         self._sync_ad_task(t["id"])
         self._ensure_ad_joiner_type_check(t)
         if self._joiner_snipe_refresh_job:
@@ -442,15 +482,13 @@ class MainWindow(tk.Toplevel):
         tk.Label(self._detail, text=t["key"], bg=BG, fg=GRAY,
                  font=("Segoe UI", 8)).pack(anchor="w", padx=24, pady=(0, 10))
 
-        if self.storage.ad_setup_done(t["id"]) or self._snipeit:
-            summary_row = tk.Frame(self._detail, bg=BG)
-            summary_row.pack(fill="x", padx=24, pady=(2, 12))
-            summary_row.columnconfigure(0, weight=1, uniform="joiner_summary")
-            summary_row.columnconfigure(1, weight=1, uniform="joiner_summary")
-            if self.storage.ad_setup_done(t["id"]):
-                self._show_ad_setup_summary(t, parent=summary_row, column=0)
-            if self._snipeit:
-                self._show_joiner_snipe_assets(t, parent=summary_row, column=1)
+        summary_row = tk.Frame(self._detail, bg=BG)
+        summary_row.pack(fill="x", padx=24, pady=(2, 12))
+        summary_row.columnconfigure(0, weight=1, uniform="joiner_summary")
+        summary_row.columnconfigure(1, weight=1, uniform="joiner_summary")
+        self._show_ad_setup_summary(t, parent=summary_row, column=0)
+        if self._snipeit:
+            self._show_joiner_snipe_assets(t, parent=summary_row, column=1)
         self._show_buddy_box(t)
 
         # Divider
@@ -548,6 +586,11 @@ class MainWindow(tk.Toplevel):
             self._bind_detail_scroll(child)
 
     def _toggle(self, ticket_id: str, idx: int, var: tk.BooleanVar):
+        if idx == AD_TASK_INDEX:
+            var.set(self.storage.ad_setup_done(ticket_id))
+            ticket = next((t for t in self.tickets if t["id"] == ticket_id), None)
+            if ticket:
+                self._ensure_ad_status_check(ticket, force=True)
         self.storage.set(ticket_id, idx, var.get(), len(TASKS))
         done = self.storage.completed_count(ticket_id, len(TASKS))
         self._status.set(f"  {done}/{len(TASKS)} tasks completed")
@@ -1087,6 +1130,8 @@ class MainWindow(tk.Toplevel):
 
     def update_tickets(self, tickets: list):
         self.tickets = tickets
+        if self._printer_panel:
+            self._printer_panel.update_tickets(tickets)
         self._sync_persisted_buddy_state()
         self._refresh_list()
         self._status.set(f"Loaded {len(tickets)} ticket(s).")
@@ -1258,11 +1303,22 @@ class MainWindow(tk.Toplevel):
 
     def _show_ad_setup_summary(self, t: dict, parent: tk.Frame | None = None, column: int = 0):
         info = self.storage.get_ad_setup(t["id"])
-        if not info:
-            return
+        checking = t["id"] in self._ad_status_checks
+        result = info.get("live_check", {})
+        done = self.storage.ad_setup_done(t["id"])
+        state = "checking" if checking else result.get("state", "unknown")
+        headings = {"checking": "Checking Active Directory...", "verified": "AD setup verified",
+                    "drift": "AD setup needs attention", "partial": "AD history recovered — partial verification",
+                    "unavailable": "AD verification unavailable", "unknown": "AD setup not verified"}
+        heading = headings.get(state, headings["unknown"])
+        if state == "partial" and done:
+            heading = "AD completed — limited setup history"
+        if state == "verified" and not done:
+            heading = "AD check expired — refresh required"
+        bg = "#E7F4EC" if done and not checking else SOFT_GOLD
 
         parent = parent or self._detail
-        box = tk.Frame(parent, bg="#E7F4EC", highlightbackground="#B8E0C7",
+        box = tk.Frame(parent, bg=bg, highlightbackground=BORDER,
                        highlightthickness=1)
         if parent is self._detail:
             box.pack(fill="x", padx=24, pady=(2, 12))
@@ -1270,34 +1326,55 @@ class MainWindow(tk.Toplevel):
             box.grid(row=0, column=column, sticky="nsew", padx=(0, 6), pady=0)
         details = []
         if info.get("email"):
-            details.append(f"Email: {info['email']}")
+            details.append(f"Expected email: {info['email']}")
         if info.get("groups_count") not in (None, ""):
-            details.append(f"Groups added: {info['groups_count']}")
+            details.append(f"Expected groups: {info['groups_count']}")
+        actual = result.get("actual", {})
+        if actual and not checking:
+            details.append("Account: " + ("enabled" if actual.get("enabled") else "DISABLED"))
+            details.append("Locked: " + ("yes" if actual.get("locked") else "no"))
+            if actual.get("email"):
+                details.append(f"Email in AD: {actual['email']}")
+            if actual.get("ou") and actual["ou"].casefold() != info.get("target_ou", "").casefold():
+                details.append(f"Current folder in AD: {actual['ou']}")
+        if result.get("checked_at"):
+            details.append(f"Last checked: {result['checked_at']}")
+        if result.get("server"):
+            details.append(f"Directory server: {result['server']}")
+        if info.get("recovered_from"):
+            details.append(f"History recovered from: {info['recovered_from']}")
+        details.extend(result.get("issues", []) if not checking else [])
+        if not checking:
+            details.extend(f"Group advisory (does not block completion): {warning}"
+                           for warning in result.get("group_warnings", []))
 
         account = (info.get("account") or "").strip()
-        password = (info.get("password") or "").strip()
+        password = (info.get("password") or "").strip() if done and not checking else ""
         sms_template = info.get("sms_template") or (
             "Hello,\n\nYour username and password is:\n\n"
             f"Username: {account}\nPassword: {password}\n\nHave a great day!"
             if account and password else ""
         )
-        header = tk.Frame(box, bg="#E7F4EC")
+        if not done or checking:
+            sms_template = ""
+        header = tk.Frame(box, bg=bg)
         header.pack(fill="x", padx=10, pady=(8, 2))
-        tk.Label(header, text="AD setup completed", bg="#E7F4EC", fg=GREEN,
+        tk.Label(header, text=heading, bg=bg, fg=GREEN if done and not checking else DARK_GOLD,
                  font=("Segoe UI", 10, "bold")).pack(side="left")
+        self._make_btn(header, "Check AD", lambda: self._refresh_selected_ad(t), WHITE, ACCENT).pack(side="right")
 
         if account:
-            account_frame = tk.Frame(box, bg="#E7F4EC")
+            account_frame = tk.Frame(box, bg=bg)
             account_frame.pack(fill="x", padx=10, pady=(4, 8))
             self._make_selectable_label(
-                account_frame, f"Account: {account}", "#E7F4EC", TEXT,
+                account_frame, f"Account: {account}", bg, TEXT,
                 font=("Segoe UI", 12, "bold"),
             ).pack(anchor="w", fill="x")
             if password:
-                password_row = tk.Frame(account_frame, bg="#E7F4EC")
+                password_row = tk.Frame(account_frame, bg=bg)
                 password_row.pack(fill="x", pady=(2, 0))
                 self._make_selectable_label(
-                    password_row, "Password: stored securely", "#E7F4EC", TEXT,
+                    password_row, "Password: stored securely", bg, TEXT,
                     font=("Segoe UI", 10, "bold"),
                 ).pack(side="left", fill="x", expand=True)
                 self._make_btn(
@@ -1306,24 +1383,24 @@ class MainWindow(tk.Toplevel):
                     WHITE, GREEN,
                 ).pack(side="right", padx=(8, 0))
 
-        details_frame = tk.Frame(box, bg="#E7F4EC")
+        details_frame = tk.Frame(box, bg=bg)
         details_frame.pack(fill="x", padx=10, pady=(0, 8))
         for detail in details:
-            self._make_selectable_label(details_frame, detail, "#E7F4EC", TEXT,
-                                        font=("Segoe UI", 9)).pack(
+            self._make_selectable_label(details_frame, detail, bg, TEXT,
+                                        font=("Segoe UI", 9), wrap=620).pack(
                                             anchor="w", fill="x", pady=1)
 
         if info.get("target_ou"):
             self._make_selectable_label(
-                box, f"Target folder: {info['target_ou']}", "#E7F4EC", GRAY,
+                box, f"Target folder: {info['target_ou']}", bg, GRAY,
                 font=("Segoe UI", 8), wrap=620,
             ).pack(anchor="w", fill="x", padx=10, pady=(0, 8))
 
         if info.get("phone") or sms_template:
-            handoff = tk.Frame(box, bg="#E7F4EC")
+            handoff = tk.Frame(box, bg=bg)
             handoff.pack(fill="x", padx=10, pady=(0, 10))
 
-            action_row = tk.Frame(handoff, bg="#E7F4EC")
+            action_row = tk.Frame(handoff, bg=bg)
             action_row.pack(fill="x")
             action_row.columnconfigure(0, weight=1)
             action_col = 0
@@ -1331,7 +1408,7 @@ class MainWindow(tk.Toplevel):
             if info.get("phone"):
                 phone = self._dedupe_repeated_country_code(info["phone"])
                 self._make_selectable_label(
-                    action_row, f"Phone: {phone}", "#E7F4EC", TEXT,
+                    action_row, f"Phone: {phone}", bg, TEXT,
                     font=("Segoe UI", 9, "bold"),
                 ).grid(row=0, column=0, sticky="ew")
                 self._make_btn(
@@ -1357,7 +1434,10 @@ class MainWindow(tk.Toplevel):
         self._ad_btn.config(state="normal", text="AD Setup", bg="#00875A", fg=WHITE)
 
     def _ad_setup_completed(self, ticket: dict):
-        self.storage.set(ticket["id"], AD_TASK_INDEX, True, len(TASKS))
+        self._ad_status_checks.pop(ticket["id"], None)
+        self._ad_status_times.pop(ticket["id"], None)
+        done = self.storage.ad_setup_done(ticket["id"])
+        self.storage.set(ticket["id"], AD_TASK_INDEX, done, len(TASKS))
         setup_scenario = self.storage.get_ad_setup(ticket["id"]).get("scenario", "")
         if setup_scenario:
             ticket["ad_joiner_scenario"] = setup_scenario
@@ -1365,14 +1445,56 @@ class MainWindow(tk.Toplevel):
         if self._sel is not None and self._sel < len(self.tickets):
             self._listbox.selection_set(self._sel)
         self._show_detail(ticket)
-        self._status.set("AD setup marked as completed.")
+        self._status.set("AD setup marked as completed." if done else "AD setup is not completed. Review the execution output.")
 
     def _sync_ad_task(self, ticket_id: str):
-        if not self.storage.ad_setup_done(ticket_id):
-            return
+        done = self.storage.ad_setup_done(ticket_id)
         state = self.storage.get(ticket_id, len(TASKS))
-        if not state[AD_TASK_INDEX]:
-            self.storage.set(ticket_id, AD_TASK_INDEX, True, len(TASKS))
+        if state[AD_TASK_INDEX] != done:
+            self.storage.set(ticket_id, AD_TASK_INDEX, done, len(TASKS))
+
+    def _refresh_selected_ad(self, ticket: dict):
+        if self._selected_ticket_id != ticket["id"]:
+            return
+        self._ensure_ad_status_check(ticket, force=True)
+        self._show_detail(ticket)
+
+    def _ensure_ad_status_check(self, ticket: dict, force: bool = False):
+        ticket_id = ticket["id"]
+        if ticket_id in self._ad_status_checks:
+            return
+        if not force and time.monotonic() - self._ad_status_times.get(ticket_id, -60) < 60:
+            return
+        token = object()
+        self._ad_status_checks[ticket_id] = token
+        saved = self.storage.get_ad_setup(ticket_id)
+
+        def _do():
+            info = recover_setup(ticket, saved)
+            result = check_setup(info)
+
+            def _apply():
+                if self._ad_status_checks.get(ticket_id) is not token:
+                    return
+                self._ad_status_checks.pop(ticket_id, None)
+                self._ad_status_times[ticket_id] = time.monotonic()
+                # A setup completed while this read was running supersedes it.
+                if self.storage.get_ad_setup(ticket_id) != saved:
+                    self._ad_status_times.pop(ticket_id, None)
+                else:
+                    self.storage.update_ad_verification(ticket_id, info, result)
+                self._refresh_list()
+                if self._sel is not None and self._sel < len(self.tickets):
+                    self._listbox.selection_set(self._sel)
+                    if self.tickets[self._sel]["id"] == ticket_id:
+                        self._show_detail(self.tickets[self._sel])
+
+            try:
+                self.after(0, _apply)
+            except (tk.TclError, RuntimeError):
+                pass
+
+        threading.Thread(target=_do, daemon=True).start()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -1506,6 +1628,12 @@ class SetupDialog(tk.Toplevel):
         "mover_jql":             DEFAULT_MOVER_JQL,
         "snipeit_url":           "https://inventory.girteka.eu",
         "snipeit_token":         "",
+        "access_card_flow_url":  "",
+        "access_card_site_url":  "",
+        "access_card_list_id":   "",
+        "access_card_sync_folder": "",
+        "access_card_tenant_id": "",
+        "access_card_client_id": "",
         "remind_days_before":    "3",
         "check_interval_minutes": "30",
     }
@@ -1741,6 +1869,64 @@ class SetupDialog(tk.Toplevel):
         )
         self._add_field(
             self._advanced,
+            "Access-card OneDrive queue folder",
+            "access_card_sync_folder",
+            hint="Uses your existing OneDrive sync. No tenant ID, client ID or app sign-in needed.",
+        )
+        tk.Button(self._advanced, text="Choose queue folder…", command=self._choose_card_queue_folder,
+                  relief="flat", bg="#DEEBFF", fg=ACCENT, padx=12, pady=6).pack(anchor="w", padx=26, pady=(4, 8))
+        tk.Button(self._advanced, text="Other access-card connection options", command=self._toggle_card_api_settings,
+                  relief="flat", bg=BG, fg=GRAY).pack(anchor="w", padx=26, pady=4)
+        self._card_api_settings = tk.Frame(self._advanced, bg=BG)
+        if not self._vars["access_card_sync_folder"].get() and any(
+                self._vars[key].get() for key in ("access_card_flow_url", "access_card_site_url", "access_card_tenant_id")):
+            self._card_api_settings.pack(fill="x")
+        self._add_field(
+            self._card_api_settings,
+            "Access-card SharePoint site address",
+            "access_card_site_url",
+            hint="For the Standard connector flow; enter the site address before /Lists/",
+        )
+        self._add_field(
+            self._card_api_settings,
+            "Access-card request list ID",
+            "access_card_list_id",
+            hint="The GUID from the request list's List settings URL",
+        )
+        self._add_field(
+            self._card_api_settings,
+            "Access-card HTTP flow URL (Premium only)",
+            "access_card_flow_url",
+            hint="Leave blank when using the SharePoint request list",
+        )
+        self._add_field(
+            self._card_api_settings,
+            "Microsoft tenant ID",
+            "access_card_tenant_id",
+            hint="Required for either access-card connection",
+        )
+        self._add_field(
+            self._card_api_settings,
+            "Access-card desktop-app client ID",
+            "access_card_client_id",
+            hint="Public Entra client; never enter a client secret",
+        )
+        self._access_card_signin_btn = tk.Button(
+            self._card_api_settings,
+            text="Sign in to access-card service",
+            command=self._sign_in_access_cards,
+            relief="flat",
+            bd=0,
+            bg="#DEEBFF",
+            fg=ACCENT,
+            activebackground="#CCE0FF",
+            font=("Segoe UI", 9),
+            padx=12,
+            pady=6,
+        )
+        self._access_card_signin_btn.pack(anchor="w", padx=26, pady=(8, 4))
+        self._add_field(
+            self._advanced,
             "Check for Jira updates every N minutes",
             "check_interval_minutes",
             hint="The default is 30 minutes",
@@ -1797,6 +1983,20 @@ class SetupDialog(tk.Toplevel):
             self._advanced.pack_forget()
             self._advanced_btn.configure(text="Advanced settings ▸")
 
+    def _choose_card_queue_folder(self):
+        initial = self._vars["access_card_sync_folder"].get() or os.environ.get("OneDriveCommercial", "")
+        folder = filedialog.askdirectory(parent=self, title="Choose the synced AccessCardQueue folder",
+                                        initialdir=initial or None, mustexist=True)
+        if folder:
+            self._vars["access_card_sync_folder"].set(folder)
+            self._card_api_settings.pack_forget()
+
+    def _toggle_card_api_settings(self):
+        if self._card_api_settings.winfo_manager():
+            self._card_api_settings.pack_forget()
+        else:
+            self._card_api_settings.pack(fill="x")
+
     def _collect(self) -> dict:
         cfg = {
             "jira_url":               self._vars["jira_url"].get().strip().rstrip("/"),
@@ -1807,6 +2007,12 @@ class SetupDialog(tk.Toplevel):
             "mover_jql":              self._vars["mover_jql"].get().strip() or DEFAULT_MOVER_JQL,
             "snipeit_url":            self._vars["snipeit_url"].get().strip().rstrip("/"),
             "snipeit_token":          self._vars["snipeit_token"].get().strip(),
+            "access_card_flow_url":   self._vars["access_card_flow_url"].get().strip(),
+            "access_card_site_url":   self._vars["access_card_site_url"].get().strip().rstrip("/"),
+            "access_card_list_id":    self._vars["access_card_list_id"].get().strip(),
+            "access_card_sync_folder": self._vars["access_card_sync_folder"].get().strip(),
+            "access_card_tenant_id":  self._vars["access_card_tenant_id"].get().strip(),
+            "access_card_client_id":  self._vars["access_card_client_id"].get().strip(),
             "remind_days_before":     int(self._vars["remind_days_before"].get() or 3),
             "check_interval_minutes": int(self._vars["check_interval_minutes"].get() or 30),
         }
@@ -1822,7 +2028,85 @@ class SetupDialog(tk.Toplevel):
             raise ValueError("Reminder days must be between 0 and 30.")
         if not 5 <= cfg["check_interval_minutes"] <= 1440:
             raise ValueError("The Jira check interval must be between 5 and 1440 minutes.")
+        if cfg["access_card_sync_folder"]:
+            from onedrive_card_queue import validate_sync_folder
+            cfg["access_card_sync_folder"] = str(validate_sync_folder(cfg["access_card_sync_folder"]))
+            for key in ("access_card_flow_url", "access_card_site_url", "access_card_list_id",
+                        "access_card_tenant_id", "access_card_client_id"):
+                cfg[key] = ""
+            return cfg
+        use_list = bool(cfg["access_card_site_url"] or cfg["access_card_list_id"])
+        if use_list and cfg["access_card_flow_url"]:
+            raise ValueError("Leave the Premium HTTP flow URL blank when using a SharePoint list.")
+        access_card_values = ((cfg["access_card_site_url"], cfg["access_card_list_id"]) if use_list
+                              else (cfg["access_card_flow_url"],)) + (
+                                  cfg["access_card_tenant_id"], cfg["access_card_client_id"])
+        if any(access_card_values) and not all(access_card_values):
+            raise ValueError(
+                "Enter the access-card location, Microsoft tenant ID, and client ID together."
+            )
+        if use_list:
+            from sharepoint_card_queue import validate_list_location
+            cfg["access_card_site_url"], cfg["access_card_list_id"] = validate_list_location(
+                cfg["access_card_site_url"], cfg["access_card_list_id"])
+        if cfg["access_card_flow_url"] and not cfg["access_card_flow_url"].startswith("https://"):
+            raise ValueError("The access-card Power Automate URL must start with https://")
+        if all(access_card_values):
+            guid_pattern = re.compile(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+                r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                re.IGNORECASE,
+            )
+            if not guid_pattern.fullmatch(cfg["access_card_tenant_id"]):
+                raise ValueError("The Microsoft tenant ID must be a GUID.")
+            if not guid_pattern.fullmatch(cfg["access_card_client_id"]):
+                raise ValueError("The access-card client ID must be a GUID.")
         return cfg
+
+    def _sign_in_access_cards(self):
+        try:
+            cfg = self._collect()
+            if cfg["access_card_sync_folder"]:
+                self._msg.config(text="The folder connection uses OneDrive's existing sign-in. Save settings to use it.", fg=GREEN)
+                return
+            if not (cfg["access_card_flow_url"] or cfg["access_card_site_url"]):
+                raise ValueError("Enter the access-card connection settings first.")
+            from power_automate_auth import PowerAutomateAuthenticator
+            authenticator = PowerAutomateAuthenticator(
+                cfg["access_card_tenant_id"], cfg["access_card_client_id"],
+                service="sharepoint" if cfg["access_card_site_url"] else "flow",
+            )
+        except Exception as e:
+            self._msg.config(text=f"Error: {e}", fg=RED)
+            return
+
+        self._msg.config(text="Opening Microsoft sign-in…", fg=GRAY)
+        self._access_card_signin_btn.configure(state="disabled")
+
+        def _connect():
+            try:
+                authenticator.get_access_token(interactive=True)
+                self.after(
+                    0,
+                    lambda: self._finish_access_card_signin(
+                        "Microsoft sign-in saved securely. Save settings to enable reservations.",
+                        GREEN,
+                    ),
+                )
+            except Exception as e:
+                error = str(e)
+                self.after(
+                    0,
+                    lambda message=error: self._finish_access_card_signin(
+                        f"Microsoft sign-in failed: {message}", RED
+                    ),
+                )
+
+        threading.Thread(target=_connect, daemon=True).start()
+
+    def _finish_access_card_signin(self, message: str, color: str):
+        self._msg.config(text=message, fg=color)
+        self._access_card_signin_btn.configure(state="normal")
 
     def _test(self):
         from jira_client import JiraClient
@@ -1861,7 +2145,7 @@ class SetupDialog(tk.Toplevel):
     def _save(self):
         try:
             cfg = self._collect()
-        except ValueError as e:
+        except (ValueError, AccessCardConfigurationError) as e:
             messagebox.showerror("Invalid input", str(e), parent=self)
             return
         self.result = cfg

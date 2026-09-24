@@ -144,7 +144,9 @@ class PrinterPanelTests(unittest.TestCase):
         for problem in (FileNotFoundError("Missing"), OSError("Corrupt image")):
             with self.subTest(problem=problem):
                 with patch.object(printer_ui.Image, "open", side_effect=problem):
-                    window = MainWindow(self.root, [], Mock(), Mock(), Mock())
+                    window = MainWindow(
+                        self.root, [], Mock(), Mock(), Mock(), card_printer_enabled=True,
+                    )
                 try:
                     notebook = window._main_frame.winfo_children()[0]
                     self.assertEqual(len(notebook.tabs()), 3)

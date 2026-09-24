@@ -117,6 +117,30 @@ class TaskStorageMigrationTests(unittest.TestCase):
         save_password.assert_called_once_with("ticket-5", "Legacy#42")
         save.assert_called_once()
 
+    def test_access_card_cache_keeps_only_the_server_contract(self):
+        task_storage, _ = self._load(
+            {"__task_schema_version": TASK_SCHEMA_VERSION}
+        )
+        with patch("storage._save") as save:
+            task_storage.mark_access_card(
+                "ticket-6",
+                {
+                    "status": "reserved",
+                    "jira_key": "GSD-123",
+                    "full_name": "Aistė Žukaitė",
+                    "card_id": "LT5053",
+                    "numeric_part": 5053,
+                    "is_confirmed": True,
+                    "unexpected": "do not persist",
+                },
+            )
+
+        cached = task_storage.get_access_card("ticket-6")
+        self.assertEqual(cached["card_id"], "LT5053")
+        self.assertNotIn("unexpected", cached)
+        self.assertIn("checked_at", cached)
+        save.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
