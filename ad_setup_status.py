@@ -26,6 +26,8 @@ def readback_from_output(output: str, account: str) -> dict:
 
 def recover_setup(ticket: dict, saved: dict, audit_path: Path | None = None) -> dict:
     """Match exact Jira keys, never names or a guessed SAM, and use the latest attempt."""
+    if saved.get("externally_completed_at"):
+        return dict(saved)
     if (saved.get("baseline") or {}).get("complete"):
         return dict(saved)
     path = audit_path or Path.home() / ".jira-reminders" / "ad_audit.log"
@@ -123,6 +125,9 @@ def build_status_script(info: dict) -> str:
 def check_setup(info: dict) -> dict:
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     base = {"checked_at": checked_at, "verified": False, "completed": False}
+    if info.get("externally_completed_at"):
+        return dict(base, state="external", completed=True,
+                    issues=["Setup completed on another computer, confirmed by the user. No live AD verification was performed."])
     if not info.get("account"):
         return dict(base, state="unknown", issues=["No setup history found for this ticket."])
     try:

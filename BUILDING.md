@@ -25,7 +25,7 @@ dist\installer\Jira-Reminders-x.y.z.msi
 ```
 
 Use `-SkipDependencyInstall` when the Python dependencies are already present.
-Use `-Version 1.7.0` to override `version.txt` for a test build.
+Use `-Version 1.8.0` to override `version.txt` for a test build.
 
 ### Code signing
 
@@ -47,8 +47,8 @@ Girteka.
 
 Before tagging a release:
 
-1. Review all changes since the previous release and run the Python and Office
-   Script checks listed in [README.md](README.md#development).
+1. Review all changes since the previous release and run the Python
+   checks listed in [README.md](README.md#development).
 2. Update `version.txt`, the README release version, `RELEASE_NOTES.md`, and the
    team KB's version, date, installer links, and changed workflows.
 3. If the KB changed, regenerate its Word copy:
@@ -63,7 +63,7 @@ Before tagging a release:
 5. Prepare a draft release with the new tag's title and notes, then push the
    tag at the tested commit.
 
-Pushing a tag such as `v1.7.0` runs
+Pushing a tag such as `v1.8.0` runs
 `.github/workflows/build-installer.yml`. The workflow:
 
 1. builds the MSI on a clean Windows runner;

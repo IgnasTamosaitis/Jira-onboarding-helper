@@ -103,8 +103,8 @@ _BUDDY_PATTERNS = [
 
 
 def is_sam_account(value: str) -> bool:
-    """Returns True if value looks like a 5-char SAM account (not a full name)."""
-    return bool(re.fullmatch(r'[A-Za-z][A-Za-z0-9]{4}', value))
+    """Recognize legacy five-character SAMs and SF x-prefixed employee accounts."""
+    return bool(re.fullmatch(r'(?:[A-Za-z][A-Za-z0-9]{4}|[xX][0-9]{5})', value))
 
 
 def _looks_like_full_name(value: str) -> bool:

@@ -1,27 +1,26 @@
 import re
+from copy import deepcopy
+from scrolling import install_scrolling
+from view_updates import update_listbox, update_readonly_text
 import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-import os
+from tkinter import messagebox, ttk
 import webbrowser
 from datetime import date
 import unicodedata
 
 from jira_client import DEFAULT_MOVER_JQL, extract_buddies_from_comments, is_sam_account
 from ad_automation import find_user_accounts, classify_scenario
-from access_card_registry import AccessCardConfigurationError
 from ad_setup_status import check_setup, recover_setup
 from mover_ui import MoversPanel
-from printer_ui import PrinterPanel
 
 TASKS = [
     "Active Directory account setup",
     "Axapta account import/creation",
     "AX user relations assignment",
     "Assign hardware & licenses in Snipe-IT",
-    "Physical access card creation",
 ]
 AD_TASK_INDEX = 0
 
@@ -45,9 +44,9 @@ PRIORITY_COMPANY_COLOR = RED
 
 class MainWindow(tk.Toplevel):
     def __init__(self, parent, tickets: list, storage, jira_client, on_refresh,
-                 snipeit=None, movers: list | None = None,
-                 card_printer_enabled: bool = False, card_registry_message: str = ""):
+                 snipeit=None, movers: list | None = None):
         super().__init__(parent)
+        install_scrolling(self)
         self.tickets   = tickets
         self.storage   = storage
         self.jira      = jira_client
@@ -61,6 +60,8 @@ class MainWindow(tk.Toplevel):
         self._ad_btn: tk.Button | None = None
         self._ask_btn: tk.Button | None = None
         self._comments_cache: dict = {}
+        self._comments_inflight: set = set()
+        self._comments_box: tk.Text | None = None
         self._joiner_snipe_frame: tk.Frame | None = None
         self._joiner_snipe_ticket_id: str = ""
         self._joiner_snipe_refresh_job = None
@@ -80,10 +81,6 @@ class MainWindow(tk.Toplevel):
         self._snipeit = snipeit
         self.movers = movers or []
         self._movers_panel: MoversPanel | None = None
-        self._card_printer_enabled = card_printer_enabled
-        self._printer_tab: tk.Frame | None = None
-        self._printer_panel: PrinterPanel | None = None
-        self._card_registry_message = card_registry_message
 
         self.title("ITSD Jira Helper")
         self.geometry("980x620")
@@ -123,31 +120,9 @@ class MainWindow(tk.Toplevel):
             movers_tab, self.movers, self.storage, self.jira, self.on_refresh
         )
         self._movers_panel.pack(fill="both", expand=True)
-        self.set_card_printer_visible(self._card_printer_enabled)
         notebook.pack(fill="both", expand=True)
         self._main_frame.pack(fill="both", expand=True)
 
-    def set_card_printer_visible(self, enabled: bool) -> None:
-        """Apply the operator's AD office check without rebuilding their ticket views."""
-        if enabled is True:
-            if self._printer_tab is None:
-                self._printer_tab = tk.Frame(self._notebook, bg=BG)
-                self._printer_panel = PrinterPanel(
-                    self._printer_tab, tickets=self.tickets, on_refresh=self.on_refresh,
-                    registry_message=self._card_registry_message,
-                )
-                self._printer_panel.pack(fill="both", expand=True)
-                if self._selected_ticket_id:
-                    self._printer_panel.select_ticket(self._selected_ticket_id)
-            self._notebook.add(self._printer_tab, text="  Card printer  ")
-        elif self._printer_tab is not None:
-            if str(self._printer_tab) in self._notebook.tabs():
-                self._notebook.forget(self._printer_tab)
-
-    def set_card_registry_message(self, message: str) -> None:
-        self._card_registry_message = message
-        if self._printer_panel:
-            self._printer_panel.set_registry_message(message)
 
     def show_update_banner(self, version: str, on_install) -> None:
         if getattr(self, "_update_banner", None):
@@ -259,9 +234,9 @@ class MainWindow(tk.Toplevel):
     # ── Ticket list ───────────────────────────────────────────────────────────
 
     def _refresh_list(self):
-        self._listbox.delete(0, "end")
+        rows = []
         today = date.today()
-        for i, t in enumerate(self.tickets):
+        for t in self.tickets:
             self._sync_ad_task(t["id"])
             done  = self.storage.completed_count(t["id"], len(TASKS))
             sd    = t["start_date"]
@@ -289,24 +264,24 @@ class MainWindow(tk.Toplevel):
             ad_tag = "  AD done" if self.storage.ad_setup_done(t["id"]) else ""
             company_tag = self._company_title_suffix(t) if self._is_priority_company(t) else ""
             label = f"  {t['key']}  {t['name']}{company_tag}  [{done}/{len(TASKS)}]  {date_tag}{ad_tag}"
-            self._listbox.insert("end", label)
             if self._is_priority_company(t):
                 color = PRIORITY_COMPANY_COLOR
-            self._listbox.itemconfig(i, fg=color)
+            rows.append((label, color))
 
         if not self.tickets:
-            self._listbox.insert("end", "  No tickets found")
+            rows.append(("  No tickets found", GRAY))
             self._status.set("No new joiner tickets found.")
+        update_listbox(self._listbox, rows)
 
     def _on_select(self, _=None):
         sel = self._listbox.curselection()
         if not sel or sel[0] >= len(self.tickets):
             return
+        if self._selected_ticket_id == self.tickets[sel[0]]["id"]:
+            return
         self._save_current_notes()
         self._sel = sel[0]
         self._selected_ticket_id = self.tickets[self._sel]["id"]
-        if self._printer_panel:
-            self._printer_panel.select_ticket(self._selected_ticket_id)
         self._show_detail(self.tickets[self._sel])
         self._update_ad_button()
 
@@ -363,11 +338,9 @@ class MainWindow(tk.Toplevel):
                     if self._sel is not None and self._sel < len(self.tickets)
                     else ""
                 )
-                updated_index = None
-                for idx, current in enumerate(self.tickets):
+                for current in self.tickets:
                     if current.get("id") == ticket_id:
                         current["ad_joiner_scenario"] = scenario
-                        updated_index = idx
                         break
                 self._refresh_list()
                 restore_id = selected_id or ticket_id
@@ -377,9 +350,8 @@ class MainWindow(tk.Toplevel):
                         self._listbox.selection_clear(0, "end")
                         self._listbox.selection_set(idx)
                         self._listbox.activate(idx)
-                        self._listbox.see(idx)
-                        if restore_id == ticket_id or updated_index == idx:
-                            self._show_detail(current)
+                        if self._selected_ticket_id == ticket_id:
+                            self._update_joiner_badge(current)
                         break
                 self._update_ad_button()
                 self._update_ask_btn()
@@ -426,24 +398,15 @@ class MainWindow(tk.Toplevel):
         self._detail_canvas.yview_moveto(0.0)
 
         # Name heading + joiner type badge
-        joiner_type = self._joiner_type(t)
-        is_rejoiner = joiner_type == "rejoiner"
         name_row = tk.Frame(self._detail, bg=BG)
         name_row.pack(anchor="w", padx=24, pady=(20, 2))
         title_color = PRIORITY_COMPANY_COLOR if self._is_priority_company(t) else TEXT
         tk.Label(name_row, text=f"{t['name']}{self._company_title_suffix(t)}", bg=BG, fg=title_color,
                  font=("Segoe UI", 16, "bold")).pack(side="left")
-        if joiner_type == "checking":
-            badge_text = "Checking AD..."
-            badge_bg = SOFT_BLUE
-            badge_fg = ACCENT
-        else:
-            badge_text = "Rejoiner" if is_rejoiner else "New Joiner"
-            badge_bg   = "#FF991F" if is_rejoiner else "#E3FCEF"
-            badge_fg   = WHITE     if is_rejoiner else GREEN
-        tk.Label(name_row, text=badge_text, bg=badge_bg, fg=badge_fg,
-                 font=("Segoe UI", 9, "bold"), padx=8, pady=3,
-                 relief="flat").pack(side="left", padx=(12, 0))
+        self._joiner_badge = tk.Label(name_row, font=("Segoe UI", 9, "bold"),
+                                      padx=8, pady=3, relief="flat")
+        self._joiner_badge.pack(side="left", padx=(12, 0))
+        self._update_joiner_badge(t)
 
         # Meta row
         today = date.today()
@@ -486,9 +449,12 @@ class MainWindow(tk.Toplevel):
         summary_row.pack(fill="x", padx=24, pady=(2, 12))
         summary_row.columnconfigure(0, weight=1, uniform="joiner_summary")
         summary_row.columnconfigure(1, weight=1, uniform="joiner_summary")
+        self._ad_summary_parent = summary_row
         self._show_ad_setup_summary(t, parent=summary_row, column=0)
         if self._snipeit:
             self._show_joiner_snipe_assets(t, parent=summary_row, column=1)
+        summary_row.bind("<Configure>", self._layout_summary_cards)
+        self._layout_summary_cards()
         self._show_buddy_box(t)
 
         # Divider
@@ -542,6 +508,7 @@ class MainWindow(tk.Toplevel):
 
         comments_box = self._make_text_box(comments_frame, height=12, readonly=True,
                                            font=("Segoe UI", 9))
+        self._comments_box = comments_box
         comments_sb = tk.Scrollbar(comments_frame, orient="vertical",
                                    command=comments_box.yview)
         comments_box.configure(yscrollcommand=comments_sb.set)
@@ -564,17 +531,30 @@ class MainWindow(tk.Toplevel):
 
         # Always refresh comments in the background so new Jira replies show up
         # even when the app has been running with a stale in-memory cache.
-        threading.Thread(
-            target=self._fetch_comments,
-            args=(t["key"], t["id"], comments_box),
-            daemon=True,
-        ).start()
+        self._refresh_comments(t)
+        self._detail_ticket_state = self._ticket_display_state(t)
 
         self._bind_detail_scroll(self._detail)
         done = self.storage.completed_count(t["id"], len(TASKS))
         self._status.set(f"  {done}/{len(TASKS)} tasks completed")
         self._update_ad_button()
         self._update_ask_btn()
+
+    def _update_joiner_badge(self, ticket):
+        kind = self._joiner_type(ticket)
+        if kind == "checking":
+            text, bg, fg = "Checking AD...", SOFT_BLUE, ACCENT
+        elif kind == "rejoiner":
+            text, bg, fg = "Rejoiner", GOLD, WHITE
+        else:
+            text, bg, fg = "New Joiner", "#E3FCEF", GREEN
+        self._joiner_badge.configure(text=text, bg=bg, fg=fg)
+
+    @staticmethod
+    def _ticket_display_state(ticket):
+        # These fields have their own panels and do not change the ticket form.
+        return date.today(), deepcopy({key: value for key, value in ticket.items()
+            if key != "ad_joiner_scenario"})
 
     def _bind_detail_scroll(self, widget):
         """Recursively bind mousewheel on all detail children to scroll the outer canvas."""
@@ -629,7 +609,8 @@ class MainWindow(tk.Toplevel):
         for t in self.tickets:
             sam = self.storage.get_manual_buddy(t["id"])
             if sam:
-                self._buddy_hint[t["id"]] = {"name": sam, "author": "manual", "date": ""}
+                if (self._buddy_hint.get(t["id"]) or {}).get("name") != sam:
+                    self._buddy_hint[t["id"]] = {"name": sam, "author": "manual", "date": ""}
                 self._buddy_fetched.add(t["id"])
                 self._manual_buddies.add(t["id"])
 
@@ -648,10 +629,77 @@ class MainWindow(tk.Toplevel):
         self._load_manual_buddies()
         self._load_dismissed_buddies()
 
+    def _summary_card_content(self, frame, title, color=ACCENT, action=None):
+        """Give every summary card the same border, heading, and content inset."""
+        frame.configure(bg=WHITE, highlightbackground=BORDER, highlightthickness=1, bd=0)
+        header = tk.Frame(frame, bg=WHITE)
+        header.pack(fill="x", padx=12, pady=(10, 8))
+        header.columnconfigure(0, weight=1)
+        header.rowconfigure(0, minsize=30)
+        heading = tk.Label(header, text=title, bg=WHITE, fg=color, width=1,
+                           font=("Segoe UI", 10, "bold"), anchor="w", justify="left", bd=0, padx=0, pady=0)
+        heading.grid(row=0, column=0, sticky="ew")
+        button = None
+        if action:
+            caption, command = action
+            button = self._make_btn(header, caption, command, WHITE, ACCENT, width=14)
+            button.grid(row=0, column=1, padx=(12, 0))
+        header.bind("<Configure>", lambda event: heading.configure(
+            wraplength=max(80, event.width - (button.winfo_reqwidth() + 12 if button else 0))))
+        body = tk.Frame(frame, bg=WHITE)
+        body.pack(fill="x", padx=12, pady=(0, 12))
+        return body
+
+    def _card_text(self, parent, text, color=TEXT, bold=False, small=False):
+        box = self._make_selectable_label(parent, str(text), WHITE, color,
+            font=("Segoe UI", 9 if small else 10, "bold" if bold else "normal"))
+        box.configure(width=1)
+        last_width = None
+
+        def fit(event):
+            nonlocal last_width
+            if event.width == last_width:
+                return
+            last_width = event.width
+            def resize():
+                if box.winfo_exists():
+                    lines = box.count("1.0", "end-1c", "displaylines")
+                    box.configure(height=max(1, (lines[0] if lines else 0) + 1))
+            self.after_idle(resize)
+
+        box.bind("<Configure>", fit)
+        return box
+
+    def _summary_value(self, parent, row, caption, value, copy_label=None, command=None, *, color=TEXT):
+        parent.columnconfigure(1, weight=1)
+        tk.Label(parent, text=caption, bg=WHITE, fg=GRAY,
+                 font=("Segoe UI", 10), anchor="w", bd=0, padx=0, pady=0).grid(
+                     row=row, column=0, sticky="w", pady=2, padx=(0, 10))
+        self._card_text(parent, value, color).grid(row=row, column=1, columnspan=1 if command else 2,
+                                          sticky="ew", pady=2)
+        if command:
+            self._make_btn(parent, copy_label, command, ACCENT, SOFT_BLUE, width=14).grid(
+                row=row, column=2, sticky="e", padx=(10, 0), pady=2)
+
+    def _layout_summary_cards(self, event=None):
+        parent = self._ad_summary_parent
+        width = event.width if event is not None else parent.winfo_width()
+        side_by_side = width >= 760
+        ad = self._ad_summary_box
+        snipe = self._joiner_snipe_frame
+        if not snipe or not snipe.winfo_exists():
+            ad.grid_configure(row=0, column=0, columnspan=2, padx=0, pady=0)
+        elif side_by_side:
+            ad.grid_configure(row=0, column=0, columnspan=1, padx=(0, 6), pady=0)
+            snipe.grid_configure(row=0, column=1, columnspan=1, padx=(6, 0), pady=0)
+        else:
+            ad.grid_configure(row=0, column=0, columnspan=2, padx=0, pady=(0, 12))
+            snipe.grid_configure(row=1, column=0, columnspan=2, padx=0, pady=0)
+
     def _show_buddy_box(self, t: dict):
         tid = t["id"]
-        frame = tk.Frame(self._detail, bg=SOFT_GOLD,
-                         highlightbackground=GOLD, highlightthickness=1)
+        frame = tk.Frame(self._detail, bg=WHITE,
+                         highlightbackground=BORDER, highlightthickness=1)
         frame.pack(fill="x", padx=24, pady=(2, 10))
         self._buddy_box_frame = frame
         self._buddy_box_ticket = tid
@@ -668,11 +716,13 @@ class MainWindow(tk.Toplevel):
             else:
                 self._draw_buddy_no_result(frame, tid)
         else:
-            tk.Label(frame, text="Scanning comments for buddy info...",
-                     bg=SOFT_GOLD, fg=GRAY,
-                     font=("Segoe UI", 9, "italic")).pack(anchor="w", padx=10, pady=6)
+            body = self._summary_card_content(frame, "Suggested buddy", DARK_GOLD)
+            self._card_text(body, "Scanning comments for buddy info...", GRAY).pack(fill="x")
 
     def _fill_buddy_box(self, frame: tk.Frame, buddy: dict, ticket_id: str):
+        if getattr(frame, "_buddy_state", None) == buddy:
+            return
+        frame._buddy_state = deepcopy(buddy)
         for w in frame.winfo_children():
             w.destroy()
 
@@ -684,17 +734,10 @@ class MainWindow(tk.Toplevel):
             self._fill_disabled_buddy_box(frame, buddy, ticket_id)
             return
 
-        frame.configure(bg=SOFT_GOLD, highlightbackground=GOLD)
-        tk.Label(frame, text="Suggested buddy", bg=SOFT_GOLD, fg=DARK_GOLD,
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 0))
-        self._make_selectable_label(
-            frame, self._buddy_caption(buddy), SOFT_GOLD, TEXT,
-            font=("Segoe UI", 11, "bold"),
-        ).pack(anchor="w", fill="x", padx=10, pady=(2, 0))
-        source = self._buddy_source_text(buddy)
-        self._make_selectable_label(frame, source, SOFT_GOLD, GRAY,
-                                    font=("Segoe UI", 8)).pack(
-                                        anchor="w", fill="x", padx=10, pady=(2, 8))
+        body = self._summary_card_content(frame, "Suggested buddy", DARK_GOLD)
+        self._card_text(body, self._buddy_caption(buddy), bold=True).pack(fill="x")
+        self._card_text(body, self._buddy_source_text(buddy), GRAY, small=True).pack(
+            fill="x", pady=(4, 0))
 
     @staticmethod
     def _buddy_caption(buddy: dict) -> str:
@@ -713,109 +756,38 @@ class MainWindow(tk.Toplevel):
         return f"From comment by {buddy.get('author', '')}  •  {buddy.get('date', '')}"
 
     def _fill_multiple_buddy_box(self, frame: tk.Frame, buddy: dict, ticket_id: str):
-        frame.configure(bg="#FFF4E5", highlightbackground="#FF991F", highlightthickness=1)
-
-        tk.Label(frame, text="Multiple buddies found — choose one",
-                 bg="#FFF4E5", fg="#B76E00",
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 0))
-        sources = {
-            (candidate.get("author", ""), candidate.get("date", ""))
-            for candidate in buddy.get("candidates", [])
-        }
-        if len(sources) == 1:
-            source = f"From comment by {buddy['author']}  •  {buddy['date']}"
-        else:
-            source = "Detected across multiple Jira comments"
-        tk.Label(frame, text=source, bg="#FFF4E5", fg=GRAY,
-                 font=("Segoe UI", 8)).pack(anchor="w", padx=10, pady=(2, 4))
-        tk.Label(frame,
-                 text="The comment mentioned more than one possible buddy. Choose the account to use as the template.",
-                 bg="#FFF4E5", fg="#B76E00",
-                 font=("Segoe UI", 9), wraplength=480, justify="left").pack(
-                     anchor="w", padx=10, pady=(0, 8))
-
+        body = self._summary_card_content(frame, "Suggested buddy", DARK_GOLD)
+        self._card_text(body, "Choose the account to use as the template.", GRAY).pack(fill="x", pady=(0, 8))
         active_candidates = 0
         for candidate in buddy.get("candidates", []):
-            card_bg = "#FFFFFF" if not candidate.get("disabled") else "#FFEBE6"
-            card = tk.Frame(frame, bg=card_bg, highlightbackground=BORDER, highlightthickness=1)
-            card.pack(fill="x", padx=10, pady=(0, 6))
-
-            top = tk.Frame(card, bg=card_bg)
-            top.pack(fill="x", padx=8, pady=(8, 2))
-            tk.Label(top, text=self._buddy_caption(candidate), bg=card_bg, fg=TEXT,
-                     font=("Segoe UI", 10, "bold")).pack(side="left")
-            if candidate.get("disabled"):
-                tk.Label(top, text="Disabled in AD", bg=card_bg, fg=RED,
-                         font=("Segoe UI", 8, "bold")).pack(side="right")
+            card = tk.Frame(body, bg=WHITE)
+            card.pack(fill="x", pady=(0, 8))
+            content = self._summary_card_content(card, self._buddy_caption(candidate),
+                RED if candidate.get("disabled") else TEXT)
+            self._card_text(content, self._buddy_source_text(candidate), GRAY, small=True).pack(fill="x")
+            disabled = candidate.get("disabled")
+            if disabled:
+                self._card_text(content, "Disabled in AD. Choose another account.", RED, small=True).pack(
+                    fill="x", pady=(4, 0))
             else:
                 active_candidates += 1
-
-            source = self._buddy_source_text(candidate)
-            tk.Label(card, text=source, bg=card_bg, fg=GRAY,
-                     font=("Segoe UI", 8), wraplength=440, justify="left").pack(
-                         anchor="w", padx=8, pady=(0, 4))
-
-            status = "This account cannot be used as a template." if candidate.get("disabled") else "Ready to use as the template account."
-            tk.Label(card, text=status, bg=card_bg,
-                     fg=RED if candidate.get("disabled") else GRAY,
-                     font=("Segoe UI", 8), wraplength=440, justify="left").pack(
-                         anchor="w", padx=8, pady=(0, 6))
-
-            tk.Button(card,
-                      text="Use this buddy",
-                      command=lambda c=candidate: self._set_manual_buddy(ticket_id, c, keep_source=False),
-                      state="disabled" if candidate.get("disabled") else "normal",
-                      relief="flat", bd=0,
-                      bg="#FF991F" if not candidate.get("disabled") else "#DDE3EA",
-                      fg=WHITE if not candidate.get("disabled") else GRAY,
-                      font=("Segoe UI", 9, "bold"),
-                      padx=10, pady=4, cursor="hand2").pack(anchor="w", padx=8, pady=(0, 8))
-
-        if active_candidates == 0:
-            tk.Label(frame,
-                     text="All detected buddy accounts are disabled. Use \"Ask reporter\" to request another template account.",
-                     bg="#FFF4E5", fg=RED,
-                     font=("Segoe UI", 9), wraplength=480, justify="left").pack(
-                         anchor="w", padx=10, pady=(0, 8))
+            button = self._make_btn(content, "Use this buddy",
+                lambda c=candidate: self._set_manual_buddy(ticket_id, c, keep_source=False),
+                ACCENT, SOFT_BLUE)
+            button.configure(state="disabled" if disabled else "normal")
+            button.pack(anchor="w", pady=(8, 0))
+        if not active_candidates:
+            self._card_text(body, 'All accounts are disabled. Use "Ask reporter" to request another buddy.',
+                            RED, small=True).pack(fill="x")
 
     def _fill_disabled_buddy_box(self, frame: tk.Frame, buddy: dict, ticket_id: str):
-        """Renders the buddy box in error state when the AD account is disabled."""
-        LIGHT_RED = "#FFEBE6"
-        DARK_RED   = "#AE2A19"
-
-        frame.configure(bg=LIGHT_RED, highlightbackground=RED, highlightthickness=2)
-
-        tk.Label(frame, text="Buddy account disabled — action required",
-                 bg=LIGHT_RED, fg=DARK_RED,
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 0))
-        tk.Label(frame, text=self._buddy_caption(buddy), bg=LIGHT_RED, fg=TEXT,
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10, pady=(2, 0))
-        source = self._buddy_source_text(buddy)
-        tk.Label(frame, text=source, bg=LIGHT_RED, fg=GRAY,
-                 font=("Segoe UI", 8)).pack(anchor="w", padx=10, pady=(2, 4))
-
-        # Warning + instructions
-        warn = tk.Frame(frame, bg="#FFBDAD",
-                        highlightbackground=DARK_RED, highlightthickness=1)
-        warn.pack(fill="x", padx=10, pady=(0, 6))
-        tk.Label(warn,
-                 text="This account is disabled in Active Directory and cannot be used as a template.",
-                 bg="#FFBDAD", fg=DARK_RED,
-                 font=("Segoe UI", 9, "bold"),
-                 wraplength=400, justify="left", anchor="w").pack(anchor="w", padx=8, pady=(6, 2))
-        tk.Label(warn,
-                 text="1. Click \"Remove disabled buddy\" below to clear this suggestion.\n"
-                      "2. Use \"Ask reporter\" to request a valid buddy from the manager or reporter.",
-                 bg="#FFBDAD", fg=DARK_RED,
-                 font=("Segoe UI", 9),
-                 wraplength=400, justify="left", anchor="w").pack(anchor="w", padx=8, pady=(0, 6))
-
-        tk.Button(frame,
-                  text="Remove disabled buddy",
-                  command=lambda: self._remove_disabled_buddy(ticket_id),
-                  relief="flat", bd=0, bg=RED, fg=WHITE,
-                  font=("Segoe UI", 9, "bold"),
-                  padx=10, pady=4, cursor="hand2").pack(anchor="w", padx=10, pady=(0, 10))
+        body = self._summary_card_content(frame, "Buddy account disabled", RED)
+        self._card_text(body, self._buddy_caption(buddy), bold=True).pack(fill="x")
+        self._card_text(body, self._buddy_source_text(buddy), GRAY, small=True).pack(fill="x", pady=(4, 8))
+        self._card_text(body, 'This account cannot be used as a template. Remove it and use "Ask reporter" to request a valid buddy.',
+                        RED, small=True).pack(fill="x")
+        self._make_btn(body, "Remove disabled buddy", lambda: self._remove_disabled_buddy(ticket_id),
+                       WHITE, RED).pack(anchor="w", pady=(8, 0))
 
     def _remove_disabled_buddy(self, ticket_id: str):
         if ticket_id is None:
@@ -835,22 +807,21 @@ class MainWindow(tk.Toplevel):
         self._update_ask_btn()
 
     def _draw_buddy_no_result(self, frame: tk.Frame, ticket_id: str):
+        if hasattr(frame, "_buddy_state") and frame._buddy_state is None:
+            return
+        frame._buddy_state = None
         for w in frame.winfo_children():
             w.destroy()
-        frame.configure(bg="#FFF4E5", highlightbackground="#FF991F")
-        tk.Label(frame,
-                 text="Buddy not mentioned in comments — consider asking the reporter",
-                 bg="#FFF4E5", fg="#B76E00",
-                 font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(6, 2))
-
-        entry_row = tk.Frame(frame, bg="#FFF4E5")
-        entry_row.pack(anchor="w", padx=10, pady=(0, 6))
-        tk.Label(entry_row, text="Manual buddy:", bg="#FFF4E5", fg="#B76E00",
-                 font=("Segoe UI", 9)).pack(side="left")
+        body = self._summary_card_content(frame, "Suggested buddy", DARK_GOLD)
+        self._card_text(body, "No buddy selected. Choose an account or ask the reporter.", GRAY).pack(fill="x")
+        entry_row = tk.Frame(body, bg=WHITE)
+        entry_row.pack(fill="x", pady=(8, 0))
+        tk.Label(entry_row, text="Manual buddy", bg=WHITE, fg=GRAY,
+                 font=("Segoe UI", 9), padx=0).pack(side="left")
         buddy_var = tk.StringVar()
-        entry = tk.Entry(entry_row, textvariable=buddy_var, font=("Consolas", 10),
+        entry = tk.Entry(entry_row, textvariable=buddy_var, font=("Segoe UI", 10),
                          relief="solid", bd=1, width=14)
-        entry.pack(side="left", padx=6, ipady=2)
+        entry.pack(side="left", padx=8, ipady=3)
 
         def _set_manual():
             name = buddy_var.get().strip()
@@ -858,9 +829,7 @@ class MainWindow(tk.Toplevel):
                 return
             self._set_manual_buddy(ticket_id, {"name": name, "author": "manual", "date": ""})
 
-        tk.Button(entry_row, text="Set as buddy", command=_set_manual,
-                  relief="flat", bd=0, bg="#FF991F", fg=WHITE,
-                  font=("Segoe UI", 9), padx=8, pady=2, cursor="hand2").pack(side="left")
+        self._make_btn(entry_row, "Set as buddy", _set_manual, ACCENT, SOFT_BLUE).pack(side="left")
         entry.bind("<Return>", lambda _: _set_manual())
 
     def _set_manual_buddy(self, ticket_id: str, buddy_data: dict, keep_source: bool = True):
@@ -952,17 +921,41 @@ class MainWindow(tk.Toplevel):
 
     # ── Comments ──────────────────────────────────────────────────────────────
 
-    def _fetch_comments(self, issue_key: str, ticket_id: str, box: tk.Text):
+    def _refresh_comments(self, ticket):
+        ticket_id = ticket["id"]
+        if ticket_id in self._comments_inflight:
+            return
+        self._comments_inflight.add(ticket_id)
+        threading.Thread(target=self._fetch_comments,
+                         args=(ticket["key"], ticket_id),
+                         daemon=True).start()
+
+    def _fetch_comments(self, issue_key: str, ticket_id: str):
         try:
             comments = self.jira.get_comments(issue_key)
-            self._comments_cache[issue_key] = comments
             buddy = self._resolve_buddy_from_comments(ticket_id, comments)
-            self._buddy_hint[ticket_id] = buddy
-            self._buddy_fetched.add(ticket_id)
-            self.after(0, lambda: self._populate_comments(box, comments))
-            self.after(0, lambda: self._refresh_buddy_box(ticket_id, buddy))
-        except Exception as e:
-            self.after(0, lambda: self._set_comments_text(box, f"Could not load comments: {e}"))
+            error = ""
+        except Exception as exc:
+            comments, buddy, error = None, None, f"Could not load comments: {exc}"
+
+        def apply():
+            self._comments_inflight.discard(ticket_id)
+            if comments is not None:
+                self._comments_cache[issue_key] = comments
+                self._buddy_hint[ticket_id] = buddy
+                self._buddy_fetched.add(ticket_id)
+            if self._selected_ticket_id != ticket_id or self._comments_box is None:
+                return
+            if error:
+                self._set_comments_text(self._comments_box, error)
+            else:
+                self._populate_comments(self._comments_box, comments)
+                self._refresh_buddy_box(ticket_id, buddy)
+
+        try:
+            self.after(0, apply)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _resolve_and_show_buddy(self, ticket_id: str, comments: list[dict]):
         """Resolve buddy from already-cached comments, off the UI thread."""
@@ -1087,10 +1080,7 @@ class MainWindow(tk.Toplevel):
     @staticmethod
     def _set_comments_text(box: tk.Text, text: str):
         try:
-            box.config(state="normal")
-            box.delete("1.0", "end")
-            box.insert("1.0", text)
-            box.config(state="disabled")
+            update_readonly_text(box, text)
         except tk.TclError:
             pass
 
@@ -1129,9 +1119,13 @@ class MainWindow(tk.Toplevel):
             messagebox.showerror("Backup failed", str(e), parent=self)
 
     def update_tickets(self, tickets: list):
+        previous = {ticket["id"]: ticket for ticket in self.tickets}
+        for ticket in tickets:
+            old = previous.get(ticket["id"], {})
+            if all(ticket.get(key) == old.get(key) for key in ("first_name", "last_name", "rejoiner")):
+                if old.get("ad_joiner_scenario") and not ticket.get("ad_joiner_scenario"):
+                    ticket["ad_joiner_scenario"] = old["ad_joiner_scenario"]
         self.tickets = tickets
-        if self._printer_panel:
-            self._printer_panel.update_tickets(tickets)
         self._sync_persisted_buddy_state()
         self._refresh_list()
         self._status.set(f"Loaded {len(tickets)} ticket(s).")
@@ -1144,9 +1138,20 @@ class MainWindow(tk.Toplevel):
                 self._listbox.selection_clear(0, "end")
                 self._listbox.selection_set(self._sel)
                 self._listbox.activate(self._sel)
-                self._show_detail(tickets[self._sel])
+                ticket = tickets[self._sel]
+                if self._detail_ticket_state != self._ticket_display_state(ticket):
+                    self._show_detail(ticket)
+                else:
+                    self._update_joiner_badge(ticket)
+                    self._refresh_comments(ticket)
             else:
+                self._save_current_notes()
                 self._selected_ticket_id = None
+                self._notes_box = None
+                self._comments_box = None
+                self._detail_canvas.place_forget()
+                self._detail_sb.place_forget()
+                self._hint.place(relx=0.5, rely=0.5, anchor="center")
         self._update_ad_button()
         self._update_ask_btn()
 
@@ -1156,13 +1161,17 @@ class MainWindow(tk.Toplevel):
             self._movers_panel.update_movers(movers)
 
     def _show_joiner_snipe_assets(self, t: dict, parent: tk.Frame, column: int = 1):
-        box = tk.Frame(parent, bg="#E9F2FF", highlightbackground=ACCENT,
+        box = tk.Frame(parent, bg=WHITE, highlightbackground=BORDER,
                        highlightthickness=1)
         box.grid(row=0, column=column, sticky="nsew", padx=(6, 0), pady=0)
         box.columnconfigure(0, weight=1)
         self._joiner_snipe_frame = box
         self._joiner_snipe_ticket_id = t["id"]
-        self._draw_joiner_snipe_state("Loading Snipe-IT assets...")
+        cached = getattr(self, "_snipe_display_cache", {}).get(t["id"])
+        if cached:
+            self._draw_joiner_snipe_state(**cached)
+        else:
+            self._draw_joiner_snipe_state("Loading Snipe-IT assets...")
         self._fetch_joiner_snipe_assets(t, schedule_next=True)
 
     def _draw_joiner_snipe_state(
@@ -1180,32 +1189,30 @@ class MainWindow(tk.Toplevel):
         except tk.TclError:
             return
 
+        state = dict(message=message, assets=deepcopy(assets), error=error)
+        if getattr(frame, "_display_state", None) == state:
+            return
+        frame._display_state = state
+        if not hasattr(self, "_snipe_display_cache"):
+            self._snipe_display_cache = {}
+        self._snipe_display_cache[self._joiner_snipe_ticket_id] = state
+        visible = (message, error, None if assets is None else
+                   tuple(sorted(self._snipe_asset_lines(asset) for asset in assets)))
+        if getattr(frame, "_display_key", None) == visible:
+            return
+        frame._display_key = visible
         for child in frame.winfo_children():
             child.destroy()
-        bg = "#FFF4E5" if error else "#E9F2FF"
-        fg = "#B76E00" if error else ACCENT
-        frame.configure(bg=bg, highlightbackground=fg if error else ACCENT)
-
-        header = tk.Frame(frame, bg=bg)
-        header.pack(fill="x", padx=10, pady=(8, 4))
-        tk.Label(header, text="Assigned assets (Snipe-IT)", bg=bg, fg=fg,
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
-
+        body = self._summary_card_content(frame, "Assigned assets (Snipe-IT)", RED if error else ACCENT)
         if assets is not None:
             if not assets:
-                self._make_selectable_label(frame, "No assets assigned yet.", bg, GRAY,
-                                            font=("Segoe UI", 9)).pack(
-                                                anchor="w", fill="x", padx=10, pady=(0, 8))
-                return
-            for asset in assets:
-                self._draw_joiner_snipe_asset(frame, asset, bg)
-            return
+                self._card_text(body, "No assets assigned yet.", GRAY).pack(fill="x")
+            for asset in sorted(assets, key=self._snipe_asset_lines):
+                self._draw_joiner_snipe_asset(body, asset, WHITE)
+        else:
+            self._card_text(body, message, RED if error else GRAY).pack(fill="x")
 
-        self._make_selectable_label(frame, message, bg, fg if error else GRAY,
-                                    font=("Segoe UI", 9)).pack(
-                                        anchor="w", fill="x", padx=10, pady=(0, 8))
-
-    def _draw_joiner_snipe_asset(self, parent: tk.Frame, asset: dict, bg: str):
+    def _snipe_asset_lines(self, asset: dict) -> tuple[str, str]:
         model = ((asset.get("model") or {}).get("name") or asset.get("name") or "Asset").strip()
         tag = (asset.get("asset_tag") or "").strip()
         serial = (asset.get("serial") or "").strip()
@@ -1214,26 +1221,18 @@ class MainWindow(tk.Toplevel):
         location = asset.get("location", "")
         if isinstance(location, dict):
             location = location.get("name", "")
+        title = "  ".join(part for part in (model, f"#{tag}" if tag else "") if part)
+        meta = "  |  ".join(str(part) for part in
+                             (f"SN: {serial}" if serial else "", category, status, location) if part)
+        return title, meta
 
-        row = tk.Frame(parent, bg=bg)
-        row.pack(fill="x", padx=10, pady=(0, 8))
-        title_bits = [part for part in (model, f"#{tag}" if tag else "") if part]
-        self._make_selectable_label(row, "  ".join(title_bits), bg, TEXT,
-                                    font=("Segoe UI", 10, "bold")).pack(
-                                        anchor="w", fill="x")
-        meta = []
-        if serial:
-            meta.append(f"SN: {serial}")
-        if category:
-            meta.append(category)
-        if status:
-            meta.append(str(status))
-        if location:
-            meta.append(str(location))
+    def _draw_joiner_snipe_asset(self, parent: tk.Frame, asset: dict, bg: str):
+        title, meta = self._snipe_asset_lines(asset)
+        row = tk.Frame(parent, bg=WHITE)
+        row.pack(fill="x", pady=(0, 8))
+        self._card_text(row, title, bold=True).pack(fill="x")
         if meta:
-            self._make_selectable_label(row, "  |  ".join(meta), bg, GRAY,
-                                        font=("Segoe UI", 8), wrap=520).pack(
-                                            anchor="w", fill="x", pady=(1, 0))
+            self._card_text(row, meta, GRAY, small=True).pack(fill="x", pady=(4, 0))
 
     @staticmethod
     def _snipe_asset_status(asset: dict) -> str:
@@ -1303,11 +1302,13 @@ class MainWindow(tk.Toplevel):
 
     def _show_ad_setup_summary(self, t: dict, parent: tk.Frame | None = None, column: int = 0):
         info = self.storage.get_ad_setup(t["id"])
-        checking = t["id"] in self._ad_status_checks
         result = info.get("live_check", {})
+        checking = t["id"] in self._ad_status_checks and not result
         done = self.storage.ad_setup_done(t["id"])
         state = "checking" if checking else result.get("state", "unknown")
+        verified = done and state == "verified"
         headings = {"checking": "Checking Active Directory...", "verified": "AD setup verified",
+                    "external": "AD completed externally — user confirmed",
                     "drift": "AD setup needs attention", "partial": "AD history recovered — partial verification",
                     "unavailable": "AD verification unavailable", "unknown": "AD setup not verified"}
         heading = headings.get(state, headings["unknown"])
@@ -1315,115 +1316,83 @@ class MainWindow(tk.Toplevel):
             heading = "AD completed — limited setup history"
         if state == "verified" and not done:
             heading = "AD check expired — refresh required"
-        bg = "#E7F4EC" if done and not checking else SOFT_GOLD
 
         parent = parent or self._detail
-        box = tk.Frame(parent, bg=bg, highlightbackground=BORDER,
-                       highlightthickness=1)
+        box = tk.Frame(parent, bg=WHITE)
         if parent is self._detail:
             box.pack(fill="x", padx=24, pady=(2, 12))
         else:
-            box.grid(row=0, column=column, sticky="nsew", padx=(0, 6), pady=0)
-        details = []
-        if info.get("email"):
-            details.append(f"Expected email: {info['email']}")
-        if info.get("groups_count") not in (None, ""):
-            details.append(f"Expected groups: {info['groups_count']}")
-        actual = result.get("actual", {})
-        if actual and not checking:
-            details.append("Account: " + ("enabled" if actual.get("enabled") else "DISABLED"))
-            details.append("Locked: " + ("yes" if actual.get("locked") else "no"))
-            if actual.get("email"):
-                details.append(f"Email in AD: {actual['email']}")
-            if actual.get("ou") and actual["ou"].casefold() != info.get("target_ou", "").casefold():
-                details.append(f"Current folder in AD: {actual['ou']}")
-        if result.get("checked_at"):
-            details.append(f"Last checked: {result['checked_at']}")
-        if result.get("server"):
-            details.append(f"Directory server: {result['server']}")
-        if info.get("recovered_from"):
-            details.append(f"History recovered from: {info['recovered_from']}")
-        details.extend(result.get("issues", []) if not checking else [])
-        if not checking:
-            details.extend(f"Group advisory (does not block completion): {warning}"
-                           for warning in result.get("group_warnings", []))
-
+            box.grid(row=0, column=column, sticky="new", padx=(0, 6))
+        self._ad_summary_box = box
+        self._ad_summary_state = self._ad_display_state(t["id"])
+        body = self._summary_card_content(box, heading, GREEN if done and not checking else DARK_GOLD,
+            action=("Check AD", lambda: self._refresh_selected_ad(t)))
+        fields = tk.Frame(body, bg=WHITE)
+        fields.pack(fill="x")
+        row = 0
         account = (info.get("account") or "").strip()
         password = (info.get("password") or "").strip() if done and not checking else ""
-        sms_template = info.get("sms_template") or (
-            "Hello,\n\nYour username and password is:\n\n"
-            f"Username: {account}\nPassword: {password}\n\nHave a great day!"
-            if account and password else ""
-        )
-        if not done or checking:
-            sms_template = ""
-        header = tk.Frame(box, bg=bg)
-        header.pack(fill="x", padx=10, pady=(8, 2))
-        tk.Label(header, text=heading, bg=bg, fg=GREEN if done and not checking else DARK_GOLD,
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
-        self._make_btn(header, "Check AD", lambda: self._refresh_selected_ad(t), WHITE, ACCENT).pack(side="right")
-
+        actual = result.get("actual", {})
         if account:
-            account_frame = tk.Frame(box, bg=bg)
-            account_frame.pack(fill="x", padx=10, pady=(4, 8))
-            self._make_selectable_label(
-                account_frame, f"Account: {account}", bg, TEXT,
-                font=("Segoe UI", 12, "bold"),
-            ).pack(anchor="w", fill="x")
-            if password:
-                password_row = tk.Frame(account_frame, bg=bg)
-                password_row.pack(fill="x", pady=(2, 0))
-                self._make_selectable_label(
-                    password_row, "Password: stored securely", bg, TEXT,
-                    font=("Segoe UI", 10, "bold"),
-                ).pack(side="left", fill="x", expand=True)
-                self._make_btn(
-                    password_row, "Copy password",
-                    lambda text=password: self._copy_sensitive_to_clipboard(text),
-                    WHITE, GREEN,
-                ).pack(side="right", padx=(8, 0))
+            self._summary_value(fields, row, "Username", account, "Copy username",
+                lambda: self._copy_to_clipboard(account))
+            row += 1
+        enabled = actual.get("enabled")
+        account_status, account_color = ("Unknown", GRAY)
+        if enabled is True:
+            account_status, account_color = ("Enabled", GREEN)
+        elif enabled is False:
+            account_status, account_color = ("Disabled", RED)
+        self._summary_value(fields, row, "Account", account_status, color=account_color)
+        row += 1
+        if done and not checking:
+            self._summary_value(fields, row, "Password", password or "Not stored on this computer",
+                "Copy password", (lambda: self._copy_sensitive_to_clipboard(password)) if password else None)
+            row += 1
+            groups = actual.get("groups")
+            count = len(groups) if isinstance(groups, list) else info.get("groups_count")
+            if count is None and "groups" in (info.get("baseline") or {}):
+                count = len(info["baseline"]["groups"])
+            self._summary_value(fields, row, "Groups", count if count is not None else "Not recorded")
+            row += 1
+            ou = actual.get("ou") or info.get("target_ou") or (info.get("baseline") or {}).get("target_ou")
+            self._summary_value(fields, row, "Current OU", ou or "Not recorded")
+            row += 1
 
-        details_frame = tk.Frame(box, bg=bg)
-        details_frame.pack(fill="x", padx=10, pady=(0, 8))
-        for detail in details:
-            self._make_selectable_label(details_frame, detail, bg, TEXT,
-                                        font=("Segoe UI", 9), wrap=620).pack(
-                                            anchor="w", fill="x", pady=1)
+        phone = self._dedupe_repeated_country_code(info.get("phone") or t.get("phone") or "")
+        if phone:
+            self._summary_value(fields, row, "Phone", phone, "Copy phone",
+                lambda: self._copy_to_clipboard(phone))
 
-        if info.get("target_ou"):
-            self._make_selectable_label(
-                box, f"Target folder: {info['target_ou']}", bg, GRAY,
-                font=("Segoe UI", 8), wrap=620,
-            ).pack(anchor="w", fill="x", padx=10, pady=(0, 8))
+        if not verified:
+            details = []
+            if not checking:
+                if actual:
+                    if actual.get("locked"):
+                        details.append("Account is locked.")
+                    if not done and actual.get("ou"):
+                        details.append(f"Current OU: {actual['ou']}")
+                details.extend(result.get("issues", []))
+                details.extend(result.get("group_warnings", []))
+            for detail in details:
+                self._card_text(body, detail, GRAY, small=True).pack(fill="x", pady=(6, 0))
 
-        if info.get("phone") or sms_template:
-            handoff = tk.Frame(box, bg=bg)
-            handoff.pack(fill="x", padx=10, pady=(0, 10))
+        if done and not checking and account:
+            from ad_ui import ADSetupWindow
+            sms_template = ADSetupWindow._sms_template(account)
+            actions = tk.Frame(body, bg=WHITE)
+            actions.pack(fill="x", pady=(10, 0))
+            self._make_btn(actions, "Copy message",
+                lambda: self._copy_sensitive_to_clipboard(sms_template), ACCENT, SOFT_BLUE, width=14).pack(anchor="w")
 
-            action_row = tk.Frame(handoff, bg=bg)
-            action_row.pack(fill="x")
-            action_row.columnconfigure(0, weight=1)
-            action_col = 0
-
-            if info.get("phone"):
-                phone = self._dedupe_repeated_country_code(info["phone"])
-                self._make_selectable_label(
-                    action_row, f"Phone: {phone}", bg, TEXT,
-                    font=("Segoe UI", 9, "bold"),
-                ).grid(row=0, column=0, sticky="ew")
-                self._make_btn(
-                    action_row, "Copy phone",
-                    lambda phone=phone: self._copy_to_clipboard(phone),
-                    WHITE, GREEN,
-                ).grid(row=0, column=1, sticky="e", padx=(8, 0))
-                action_col = 2
-
-            if sms_template:
-                self._make_btn(
-                    action_row, "Copy message",
-                    lambda text=sms_template: self._copy_sensitive_to_clipboard(text),
-                    WHITE, GREEN,
-                ).grid(row=0, column=action_col, sticky="e", padx=(8, 0))
+        # Background polls can update this value without rebuilding the card.
+        # The compact verified view deliberately omits diagnostic timestamps.
+        self._ad_checked_text = tk.StringVar(value=f"Last checked: {result.get('checked_at', 'Not yet checked')}")
+        if not verified:
+            tk.Label(body, textvariable=self._ad_checked_text, bg=WHITE, fg=GRAY,
+                     font=("Segoe UI", 8), anchor="w", bd=0, padx=0, pady=0).pack(fill="x", pady=(8, 0))
+        if parent is getattr(self, "_ad_summary_parent", None):
+            self._layout_summary_cards()
 
     def _update_ad_button(self):
         if not self._ad_btn:
@@ -1453,11 +1422,18 @@ class MainWindow(tk.Toplevel):
         if state[AD_TASK_INDEX] != done:
             self.storage.set(ticket_id, AD_TASK_INDEX, done, len(TASKS))
 
+    def _ad_display_state(self, ticket_id):
+        info = deepcopy(self.storage.get_ad_setup(ticket_id))
+        info.get("live_check", {}).pop("checked_at", None)
+        return info, self.storage.ad_setup_done(ticket_id)
+
     def _refresh_selected_ad(self, ticket: dict):
         if self._selected_ticket_id != ticket["id"]:
             return
         self._ensure_ad_status_check(ticket, force=True)
-        self._show_detail(ticket)
+        if self._ad_status_job:
+            self.after_cancel(self._ad_status_job)
+        self._ad_status_job = self.after(60000, lambda: self._refresh_selected_ad(ticket))
 
     def _ensure_ad_status_check(self, ticket: dict, force: bool = False):
         ticket_id = ticket["id"]
@@ -1487,7 +1463,12 @@ class MainWindow(tk.Toplevel):
                 if self._sel is not None and self._sel < len(self.tickets):
                     self._listbox.selection_set(self._sel)
                     if self.tickets[self._sel]["id"] == ticket_id:
-                        self._show_detail(self.tickets[self._sel])
+                        if self._ad_summary_state != self._ad_display_state(ticket_id):
+                            self._ad_summary_box.destroy()
+                            self._show_ad_setup_summary(self.tickets[self._sel], self._ad_summary_parent)
+                        else:
+                            self._ad_checked_text.set(f"Last checked: {result.get('checked_at', 'Not yet checked')}")
+                        self._task_vars[AD_TASK_INDEX].set(self.storage.ad_setup_done(ticket_id))
 
             try:
                 self.after(0, _apply)
@@ -1628,18 +1609,13 @@ class SetupDialog(tk.Toplevel):
         "mover_jql":             DEFAULT_MOVER_JQL,
         "snipeit_url":           "https://inventory.girteka.eu",
         "snipeit_token":         "",
-        "access_card_flow_url":  "",
-        "access_card_site_url":  "",
-        "access_card_list_id":   "",
-        "access_card_sync_folder": "",
-        "access_card_tenant_id": "",
-        "access_card_client_id": "",
         "remind_days_before":    "3",
         "check_interval_minutes": "30",
     }
 
     def __init__(self, parent, prefill: dict | None = None):
         super().__init__(parent)
+        install_scrolling(self)
         self.result = None
         self._first_run = prefill is None
         self._advanced_visible = not self._first_run
@@ -1869,64 +1845,6 @@ class SetupDialog(tk.Toplevel):
         )
         self._add_field(
             self._advanced,
-            "Access-card OneDrive queue folder",
-            "access_card_sync_folder",
-            hint="Uses your existing OneDrive sync. No tenant ID, client ID or app sign-in needed.",
-        )
-        tk.Button(self._advanced, text="Choose queue folder…", command=self._choose_card_queue_folder,
-                  relief="flat", bg="#DEEBFF", fg=ACCENT, padx=12, pady=6).pack(anchor="w", padx=26, pady=(4, 8))
-        tk.Button(self._advanced, text="Other access-card connection options", command=self._toggle_card_api_settings,
-                  relief="flat", bg=BG, fg=GRAY).pack(anchor="w", padx=26, pady=4)
-        self._card_api_settings = tk.Frame(self._advanced, bg=BG)
-        if not self._vars["access_card_sync_folder"].get() and any(
-                self._vars[key].get() for key in ("access_card_flow_url", "access_card_site_url", "access_card_tenant_id")):
-            self._card_api_settings.pack(fill="x")
-        self._add_field(
-            self._card_api_settings,
-            "Access-card SharePoint site address",
-            "access_card_site_url",
-            hint="For the Standard connector flow; enter the site address before /Lists/",
-        )
-        self._add_field(
-            self._card_api_settings,
-            "Access-card request list ID",
-            "access_card_list_id",
-            hint="The GUID from the request list's List settings URL",
-        )
-        self._add_field(
-            self._card_api_settings,
-            "Access-card HTTP flow URL (Premium only)",
-            "access_card_flow_url",
-            hint="Leave blank when using the SharePoint request list",
-        )
-        self._add_field(
-            self._card_api_settings,
-            "Microsoft tenant ID",
-            "access_card_tenant_id",
-            hint="Required for either access-card connection",
-        )
-        self._add_field(
-            self._card_api_settings,
-            "Access-card desktop-app client ID",
-            "access_card_client_id",
-            hint="Public Entra client; never enter a client secret",
-        )
-        self._access_card_signin_btn = tk.Button(
-            self._card_api_settings,
-            text="Sign in to access-card service",
-            command=self._sign_in_access_cards,
-            relief="flat",
-            bd=0,
-            bg="#DEEBFF",
-            fg=ACCENT,
-            activebackground="#CCE0FF",
-            font=("Segoe UI", 9),
-            padx=12,
-            pady=6,
-        )
-        self._access_card_signin_btn.pack(anchor="w", padx=26, pady=(8, 4))
-        self._add_field(
-            self._advanced,
             "Check for Jira updates every N minutes",
             "check_interval_minutes",
             hint="The default is 30 minutes",
@@ -1983,19 +1901,6 @@ class SetupDialog(tk.Toplevel):
             self._advanced.pack_forget()
             self._advanced_btn.configure(text="Advanced settings ▸")
 
-    def _choose_card_queue_folder(self):
-        initial = self._vars["access_card_sync_folder"].get() or os.environ.get("OneDriveCommercial", "")
-        folder = filedialog.askdirectory(parent=self, title="Choose the synced AccessCardQueue folder",
-                                        initialdir=initial or None, mustexist=True)
-        if folder:
-            self._vars["access_card_sync_folder"].set(folder)
-            self._card_api_settings.pack_forget()
-
-    def _toggle_card_api_settings(self):
-        if self._card_api_settings.winfo_manager():
-            self._card_api_settings.pack_forget()
-        else:
-            self._card_api_settings.pack(fill="x")
 
     def _collect(self) -> dict:
         cfg = {
@@ -2007,12 +1912,6 @@ class SetupDialog(tk.Toplevel):
             "mover_jql":              self._vars["mover_jql"].get().strip() or DEFAULT_MOVER_JQL,
             "snipeit_url":            self._vars["snipeit_url"].get().strip().rstrip("/"),
             "snipeit_token":          self._vars["snipeit_token"].get().strip(),
-            "access_card_flow_url":   self._vars["access_card_flow_url"].get().strip(),
-            "access_card_site_url":   self._vars["access_card_site_url"].get().strip().rstrip("/"),
-            "access_card_list_id":    self._vars["access_card_list_id"].get().strip(),
-            "access_card_sync_folder": self._vars["access_card_sync_folder"].get().strip(),
-            "access_card_tenant_id":  self._vars["access_card_tenant_id"].get().strip(),
-            "access_card_client_id":  self._vars["access_card_client_id"].get().strip(),
             "remind_days_before":     int(self._vars["remind_days_before"].get() or 3),
             "check_interval_minutes": int(self._vars["check_interval_minutes"].get() or 30),
         }
@@ -2028,85 +1927,7 @@ class SetupDialog(tk.Toplevel):
             raise ValueError("Reminder days must be between 0 and 30.")
         if not 5 <= cfg["check_interval_minutes"] <= 1440:
             raise ValueError("The Jira check interval must be between 5 and 1440 minutes.")
-        if cfg["access_card_sync_folder"]:
-            from onedrive_card_queue import validate_sync_folder
-            cfg["access_card_sync_folder"] = str(validate_sync_folder(cfg["access_card_sync_folder"]))
-            for key in ("access_card_flow_url", "access_card_site_url", "access_card_list_id",
-                        "access_card_tenant_id", "access_card_client_id"):
-                cfg[key] = ""
-            return cfg
-        use_list = bool(cfg["access_card_site_url"] or cfg["access_card_list_id"])
-        if use_list and cfg["access_card_flow_url"]:
-            raise ValueError("Leave the Premium HTTP flow URL blank when using a SharePoint list.")
-        access_card_values = ((cfg["access_card_site_url"], cfg["access_card_list_id"]) if use_list
-                              else (cfg["access_card_flow_url"],)) + (
-                                  cfg["access_card_tenant_id"], cfg["access_card_client_id"])
-        if any(access_card_values) and not all(access_card_values):
-            raise ValueError(
-                "Enter the access-card location, Microsoft tenant ID, and client ID together."
-            )
-        if use_list:
-            from sharepoint_card_queue import validate_list_location
-            cfg["access_card_site_url"], cfg["access_card_list_id"] = validate_list_location(
-                cfg["access_card_site_url"], cfg["access_card_list_id"])
-        if cfg["access_card_flow_url"] and not cfg["access_card_flow_url"].startswith("https://"):
-            raise ValueError("The access-card Power Automate URL must start with https://")
-        if all(access_card_values):
-            guid_pattern = re.compile(
-                r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
-                r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-                re.IGNORECASE,
-            )
-            if not guid_pattern.fullmatch(cfg["access_card_tenant_id"]):
-                raise ValueError("The Microsoft tenant ID must be a GUID.")
-            if not guid_pattern.fullmatch(cfg["access_card_client_id"]):
-                raise ValueError("The access-card client ID must be a GUID.")
         return cfg
-
-    def _sign_in_access_cards(self):
-        try:
-            cfg = self._collect()
-            if cfg["access_card_sync_folder"]:
-                self._msg.config(text="The folder connection uses OneDrive's existing sign-in. Save settings to use it.", fg=GREEN)
-                return
-            if not (cfg["access_card_flow_url"] or cfg["access_card_site_url"]):
-                raise ValueError("Enter the access-card connection settings first.")
-            from power_automate_auth import PowerAutomateAuthenticator
-            authenticator = PowerAutomateAuthenticator(
-                cfg["access_card_tenant_id"], cfg["access_card_client_id"],
-                service="sharepoint" if cfg["access_card_site_url"] else "flow",
-            )
-        except Exception as e:
-            self._msg.config(text=f"Error: {e}", fg=RED)
-            return
-
-        self._msg.config(text="Opening Microsoft sign-in…", fg=GRAY)
-        self._access_card_signin_btn.configure(state="disabled")
-
-        def _connect():
-            try:
-                authenticator.get_access_token(interactive=True)
-                self.after(
-                    0,
-                    lambda: self._finish_access_card_signin(
-                        "Microsoft sign-in saved securely. Save settings to enable reservations.",
-                        GREEN,
-                    ),
-                )
-            except Exception as e:
-                error = str(e)
-                self.after(
-                    0,
-                    lambda message=error: self._finish_access_card_signin(
-                        f"Microsoft sign-in failed: {message}", RED
-                    ),
-                )
-
-        threading.Thread(target=_connect, daemon=True).start()
-
-    def _finish_access_card_signin(self, message: str, color: str):
-        self._msg.config(text=message, fg=color)
-        self._access_card_signin_btn.configure(state="normal")
 
     def _test(self):
         from jira_client import JiraClient
@@ -2145,7 +1966,7 @@ class SetupDialog(tk.Toplevel):
     def _save(self):
         try:
             cfg = self._collect()
-        except (ValueError, AccessCardConfigurationError) as e:
+        except ValueError as e:
             messagebox.showerror("Invalid input", str(e), parent=self)
             return
         self.result = cfg
@@ -2171,6 +1992,7 @@ class AskReporterDialog(tk.Toplevel):
     def __init__(self, parent, ticket: dict, jira_client, on_sent,
                  disabled_buddy: str = ""):
         super().__init__(parent)
+        install_scrolling(self)
         self._ticket         = ticket
         self._jira           = jira_client
         self._on_sent        = on_sent

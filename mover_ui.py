@@ -1,11 +1,15 @@
 """Mover list and dedicated Active Directory position-change workflow."""
 
+from copy import deepcopy
 import threading
 import tkinter as tk
 from datetime import date, datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 import webbrowser
+
+from scrolling import install_scrolling
+from view_updates import update_listbox, update_readonly_text
 
 from ad_automation import (
     find_user_accounts_by_name,
@@ -108,9 +112,9 @@ class MoversPanel(tk.Frame):
             self._detail_wid, width=e.width))
 
     def _refresh_list(self):
-        self._listbox.delete(0, "end")
+        rows = []
         today = date.today()
-        for index, mover in enumerate(self.movers):
+        for mover in self.movers:
             effective = mover.get("effective_date")
             if effective:
                 delta = (effective - today).days
@@ -125,13 +129,14 @@ class MoversPanel(tk.Frame):
             )
             ad_tag = "  AD done" if self.storage.ad_setup_done(mover["id"]) else ""
             label = f"  {mover['key']}  {mover['name']}  {when}{ad_tag}"
-            self._listbox.insert("end", label)
-            self._listbox.itemconfig(index, fg=color)
+            rows.append((label, color))
         if not self.movers:
-            self._listbox.insert("end", "  No tickets found")
+            rows.append(("  No tickets found", GRAY))
             self._status.set("No employee moving tickets found.")
         else:
             self._status.set(f"Loaded {len(self.movers)} mover ticket(s).")
+
+        update_listbox(self._listbox, rows)
 
     def update_movers(self, movers: list[dict]):
         self._save_notes()
@@ -143,9 +148,11 @@ class MoversPanel(tk.Frame):
             if mover["id"] == selected_id:
                 self._listbox.selection_set(index)
                 self._listbox.activate(index)
-                self._listbox.see(index)
                 self._selected = index
-                self._show_detail(mover)
+                if self._detail_state != (date.today(), mover):
+                    self._show_detail(mover)
+                else:
+                    self._load_comments(mover, self._comments_box)
                 restored = True
                 break
         if selected_id and not restored:
@@ -162,6 +169,8 @@ class MoversPanel(tk.Frame):
         selection = self._listbox.curselection()
         if not selection or selection[0] >= len(self.movers):
             return
+        if self._selected_id == self.movers[selection[0]]["id"]:
+            return
         self._save_notes()
         self._selected = selection[0]
         mover = self.movers[self._selected]
@@ -169,6 +178,7 @@ class MoversPanel(tk.Frame):
         self._show_detail(mover)
 
     def _show_detail(self, mover: dict):
+        self._detail_state = (date.today(), deepcopy(mover))
         self._hint.place_forget()
         for widget in self._detail.winfo_children():
             widget.destroy()
@@ -309,6 +319,7 @@ class MoversPanel(tk.Frame):
         comments_frame.columnconfigure(0, weight=1)
         comments = self._make_text_box(comments_frame, height=12, readonly=True,
                                        font=("Segoe UI", 9))
+        self._comments_box = comments
         comments_sb = tk.Scrollbar(comments_frame, orient="vertical", command=comments.yview)
         comments.configure(yscrollcommand=comments_sb.set)
         comments.grid(row=0, column=0, sticky="ew")
@@ -417,15 +428,13 @@ class MoversPanel(tk.Frame):
 
     @staticmethod
     def _set_text(widget: tk.Text, text: str):
-        widget.configure(state="normal")
-        widget.delete("1.0", "end")
-        widget.insert("1.0", text)
-        widget.configure(state="disabled")
+        update_readonly_text(widget, text)
 
 
 class MoverADWindow(tk.Toplevel):
     def __init__(self, parent, ticket: dict, storage, on_completed=None):
         super().__init__(parent)
+        install_scrolling(self)
         self.ticket = ticket
         self.storage = storage
         self.on_completed = on_completed

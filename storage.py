@@ -11,8 +11,8 @@ from datetime import datetime
 DATA_DIR = Path.home() / ".jira-reminders"
 TASKS_FILE = DATA_DIR / "tasks.json"
 CONFIG_FILE = DATA_DIR / "config.json"
-DEFAULT_TASK_COUNT = 5
-TASK_SCHEMA_VERSION = 2
+DEFAULT_TASK_COUNT = 4
+TASK_SCHEMA_VERSION = 3
 _TASK_SCHEMA_VERSION_KEY = "__task_schema_version"
 
 _KEYRING_SERVICE      = "jira-reminders"
@@ -186,15 +186,7 @@ class TaskStorage:
     # ── Tasks ─────────────────────────────────────────────────────────────────
 
     def _migrate_task_schema(self) -> None:
-        """Convert legacy positional checklist state to the current five tasks.
-
-        Legacy six-item order:
-        AD, Axapta, hardware preparation, Snipe-IT assignment, SIM, physical access.
-
-        The older five-item order had no separate SIM entry. The new AX user
-        relations item has no legacy equivalent, so it intentionally starts
-        incomplete while meaningful completion state is preserved.
-        """
+        """Preserve current task progress and map older checklist positions."""
         try:
             version = int(self._data.get(_TASK_SCHEMA_VERSION_KEY, 0))
         except (TypeError, ValueError):
@@ -205,12 +197,11 @@ class TaskStorage:
         for ticket_id, raw in list(self._data.items()):
             if str(ticket_id).startswith("__") or not isinstance(raw, list):
                 continue
-            legacy = list(raw)
-            if len(legacy) >= 6:
-                migrated = [legacy[0], legacy[1], False, legacy[3], legacy[5]]
+            previous = list(raw) + [False] * DEFAULT_TASK_COUNT
+            if version >= 2:
+                migrated = previous[:DEFAULT_TASK_COUNT]
             else:
-                legacy += [False] * (5 - len(legacy))
-                migrated = [legacy[0], legacy[1], False, legacy[3], legacy[4]]
+                migrated = [previous[0], previous[1], False, previous[3]]
             self._data[ticket_id] = migrated
 
         self._data[_TASK_SCHEMA_VERSION_KEY] = TASK_SCHEMA_VERSION
@@ -304,6 +295,8 @@ class TaskStorage:
         info = self._data.get(f"__ad_setup_{ticket_id}", {})
         if not isinstance(info, dict):
             return False
+        if info.get("externally_completed_at"):
+            return True
         if info.get("scenario") == "mover":
             return bool(info.get("completed_at"))
         checked = self._ad_live_verified.get(ticket_id)
@@ -333,38 +326,13 @@ class TaskStorage:
             record["previous_baseline"] = record.pop("baseline")
         record.pop("live_check", None)
         record.pop("completed_at", None)
+        record.pop("externally_completed_at", None)
         record.update(status=status, verified=False,
                       attempted_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
         self._data[f"__ad_setup_{ticket_id}"] = record
         state = self.get(ticket_id)
         state[0] = False
         self._data[ticket_id] = state
-        _save(TASKS_FILE, self._data)
-
-    # ── Access-card registry result ──────────────────────────────────────────
-
-    def get_access_card(self, ticket_id: str) -> dict:
-        raw = self._data.get(f"__access_card_{ticket_id}", {})
-        return dict(raw) if isinstance(raw, dict) else {}
-
-    def mark_access_card(self, ticket_id: str, result: dict) -> None:
-        """Cache a server-confirmed result; the workbook remains authoritative."""
-        allowed = {
-            "status",
-            "jira_key",
-            "full_name",
-            "card_id",
-            "numeric_part",
-            "message",
-            "workbook_changed",
-            "is_confirmed",
-            "registry_name",
-            "joiner_type",
-            "registry_source",
-        }
-        safe_result = {key: result.get(key) for key in allowed if key in result}
-        safe_result["checked_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        self._data[f"__access_card_{ticket_id}"] = safe_result
         _save(TASKS_FILE, self._data)
 
     # ── Per-ticket daily notification dedup ───────────────────────────────────

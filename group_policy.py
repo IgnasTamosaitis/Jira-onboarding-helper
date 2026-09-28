@@ -18,6 +18,8 @@ RESTRICTED_GROUP_NAMES = {
     "Disable_USB",
     "VPN_IT_integracijos",
     "GrayList_WillGrow Users",
+    "Driver Hiring Manager",
+    "Driver Hiring Admin",
     "App - Users - Salesforce ClassTruck",
     "App - Users - Salesforce Service Cloud GL PROD",
     "App - Admins - Salesforce Sales Cloud GL UAT",

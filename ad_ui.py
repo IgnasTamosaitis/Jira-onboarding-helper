@@ -8,6 +8,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from datetime import datetime
 
+from scrolling import install_scrolling
+
 from ad_automation import (
     detect_location, detect_site, detect_location_conflict, detect_address_warning,
     detect_domain, build_email, uses_retired_tndm_email_domain, DEFAULT_GROUPS,
@@ -100,6 +102,7 @@ class ADSetupWindow(tk.Toplevel):
     def __init__(self, parent, ticket: dict, storage=None, on_completed=None,
                  buddy_hint: str = ""):
         super().__init__(parent)
+        install_scrolling(self)
         self.ticket    = ticket
         self.storage   = storage
         self.on_completed = on_completed
@@ -158,8 +161,6 @@ class ADSetupWindow(tk.Toplevel):
         win_id = canvas.create_window((0, 0), window=body, anchor="nw")
         body.bind("<Configure>",   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-1 * e.delta / 120), "units"))
         self._fill(body)
         if self._buddy_hint:
             self._buddy_var.set(self._buddy_hint)

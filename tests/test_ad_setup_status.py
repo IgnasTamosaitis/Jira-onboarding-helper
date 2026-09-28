@@ -22,6 +22,25 @@ def baseline():
 
 
 class HistoryTests(unittest.TestCase):
+    def test_external_confirmation_survives_refresh_and_restart_until_failed_retry(self):
+        info = {"externally_completed_at": "2026-09-24 14:00", "status": "Completed externally"}
+        with patch("ad_setup_status.run_ps") as run:
+            result = check_setup(info)
+        run.assert_not_called()
+        self.assertTrue(result["completed"])
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["state"], "external")
+        self.assertEqual(self.recover(self.entry(status="Not completed"), info), info)
+        with patch("storage._load", return_value={"__task_schema_version": TASK_SCHEMA_VERSION,
+                   "__ad_setup_123": info, "123": [False, True, False, True]}), patch("storage._save"):
+            storage = TaskStorage()
+            self.assertTrue(storage.ad_setup_done("123"))
+            storage.update_ad_verification("123", info, result)
+            self.assertEqual(storage.get("123"), [True, True, False, True])
+            storage.mark_ad_setup_incomplete("123", "Not completed")
+            self.assertFalse(storage.ad_setup_done("123"))
+            self.assertNotIn("externally_completed_at", storage.get_ad_setup("123"))
+
     def recover(self, text, saved=None):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "audit.log"
@@ -120,7 +139,7 @@ class StatusTests(unittest.TestCase):
     def test_storage_invalidates_cached_completion_and_preserves_history(self):
         info = {"completed_at": "original date", "account": "SF", "baseline": baseline()}
         with patch("storage._load", return_value={"__task_schema_version": TASK_SCHEMA_VERSION,
-                   "__ad_setup_123": info, "123": [True, True, False, True, False]}), patch("storage._save"):
+                   "__ad_setup_123": info, "123": [True, True, False, True]}), patch("storage._save"):
             storage = TaskStorage()
             self.assertFalse(storage.ad_setup_done("123"))
             with patch("storage.time.monotonic", return_value=100):
@@ -130,7 +149,7 @@ class StatusTests(unittest.TestCase):
                 self.assertFalse(storage.ad_setup_done("123"))
             storage.update_ad_verification("123", info, {"verified": False, "state": "drift"})
             self.assertFalse(storage.ad_setup_done("123"))
-            self.assertEqual(storage.get("123"), [False, True, False, True, False])
+            self.assertEqual(storage.get("123"), [False, True, False, True])
             self.assertEqual(storage._data["__ad_setup_123"]["completed_at"], "original date")
 
     def test_failed_retry_invalidates_previous_baseline(self):
@@ -210,7 +229,7 @@ class ReadOnlyDirectoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test.ps1"
             path.write_text(script, encoding="utf-8-sig")
-            result = subprocess.run(["powershell", "-NoProfile", "-File", str(path)], capture_output=True,
+            result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", str(path)], capture_output=True,
                                     encoding="utf-8", errors="replace", timeout=30,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertEqual(result.returncode, 0, result.stderr)

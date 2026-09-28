@@ -467,26 +467,6 @@ def run_ps(script: str, timeout: int = 90) -> tuple[str, str, int]:
                 pass
 
 
-def get_current_user_site() -> str:
-    """Read the operator's own AD office; unknown or unavailable offices stay unknown."""
-    script = """
-$ErrorActionPreference = 'Stop'
-Import-Module ActiveDirectory -ErrorAction Stop
-$operatorSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$operator = Get-ADUser -Identity $operatorSid -Properties Office -ErrorAction Stop
-[pscustomobject]@{office = [string]$operator.Office} | ConvertTo-Json -Compress
-"""
-    try:
-        stdout, _stderr, code = run_ps(script, timeout=10)
-        if code != 0:
-            return ""
-        result = json.loads(stdout)
-        office = result.get("office") if isinstance(result, dict) else None
-        return detect_site(office) if isinstance(office, str) else ""
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return ""
-
-
 def sam_exists(sam: str) -> bool:
     """Returns True if the SAM account exists in Active Directory."""
     _, _, code = run_ps(
@@ -503,21 +483,32 @@ DISABLED_OU_FRAGMENT = "OU=Disabled by Jira"
 def get_account_enabled_status(sam: str) -> tuple[bool | None, str, str]:
     """
     Returns (enabled, dn, display_name) for a SAM account.
-    enabled is None if the account was not found.
+    enabled is None if the account was not found or its status could not be read.
     display_name is the AD Name attribute (typically 'Firstname Lastname').
     """
     out, _, code = run_ps(
         f"Import-Module ActiveDirectory -ErrorAction Stop; "
         f"$u = Get-ADUser -Identity '{_e(sam)}' -Properties Enabled,DistinguishedName,Name -ErrorAction Stop; "
-        f"\"$($u.Enabled)|$($u.DistinguishedName)|$($u.Name)\"",
+        "Write-Output ('AD_ACCOUNT_STATUS:' + ([pscustomobject]@{"
+        "enabled=$u.Enabled; dn=$u.DistinguishedName; name=$u.Name"
+        "} | ConvertTo-Json -Compress))",
         timeout=10,
     )
     if code != 0 or not out:
         return None, "", ""
-    parts = out.split("|", 2)
-    if len(parts) < 3:
-        return None, "", ""
-    return parts[0].strip() == "True", parts[1].strip(), parts[2].strip()
+    for line in reversed(out.splitlines()):
+        if not line.startswith("AD_ACCOUNT_STATUS:"):
+            continue
+        try:
+            status = json.loads(line.split(":", 1)[1])
+        except ValueError:
+            return None, "", ""
+        if (not isinstance(status, dict) or type(status.get("enabled")) is not bool
+                or not isinstance(status.get("dn"), str) or not status["dn"].strip()
+                or not isinstance(status.get("name"), str)):
+            return None, "", ""
+        return status["enabled"], status["dn"].strip(), status["name"].strip()
+    return None, "", ""
 
 
 def is_buddy_disabled(sam: str) -> bool:
@@ -588,8 +579,11 @@ def _parse_account_search_output(out: str) -> list[dict]:
         key = f"{username}|{dn}".casefold()
         if key in seen:
             continue
+        status = parts[1].strip().casefold()
+        if status not in ("true", "false"):
+            continue
         seen.add(key)
-        enabled = parts[1].strip() == "True"
+        enabled = status == "true"
         results.append({
             "username":    username,
             "enabled":     enabled,

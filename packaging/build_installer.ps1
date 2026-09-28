@@ -86,13 +86,10 @@ $pyInstallerArgs = @(
     "--name", "JiraReminders",
     "--icon", $iconFile,
     "--version-file", $versionInfo,
-    "--add-data", ((Join-Path $repoRoot "card-bg\card.png") + ";card-bg"),
     "--distpath", $appDist,
     "--workpath", (Join-Path $buildRoot "pyinstaller"),
     "--specpath", $buildRoot,
     "--hidden-import", "keyring.backends.Windows",
-    "--hidden-import", "msal_extensions",
-    "--hidden-import", "msal_extensions.persistence",
     "--hidden-import", "plyer.platforms.win.notification",
     "--hidden-import", "pystray._win32",
     (Join-Path $repoRoot "app.py")

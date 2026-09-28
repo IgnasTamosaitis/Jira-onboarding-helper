@@ -6,7 +6,7 @@ from ui import TASKS
 
 
 class ChecklistDefinitionTests(unittest.TestCase):
-    def test_current_checklist_contains_only_the_five_requested_tasks(self):
+    def test_current_checklist_contains_only_the_four_supported_tasks(self):
         self.assertEqual(len(TASKS), DEFAULT_TASK_COUNT)
         self.assertEqual(
             TASKS,
@@ -15,7 +15,6 @@ class ChecklistDefinitionTests(unittest.TestCase):
                 "Axapta account import/creation",
                 "AX user relations assignment",
                 "Assign hardware & licenses in Snipe-IT",
-                "Physical access card creation",
             ],
         )
 
@@ -36,7 +35,7 @@ class TaskStorageMigrationTests(unittest.TestCase):
 
         self.assertEqual(
             task_storage.get("ticket-1"),
-            [True, False, False, True, False],
+            [True, False, False, True],
         )
         self.assertEqual(task_storage.get_notes("ticket-1"), "Keep this note")
         self.assertEqual(
@@ -44,18 +43,32 @@ class TaskStorageMigrationTests(unittest.TestCase):
         )
         save.assert_called_once()
 
-    def test_older_five_item_state_preserves_snipeit_and_physical_access(self):
+    def test_older_five_item_state_preserves_snipeit(self):
         task_storage, _save = self._load(
             {"ticket-2": [False, True, True, False, True]}
         )
 
         self.assertEqual(
             task_storage.get("ticket-2"),
-            [False, True, False, False, True],
+            [False, True, False, False],
         )
 
+    def test_version_two_preserves_all_remaining_task_positions(self):
+        task_storage, save = self._load({
+            "__task_schema_version": 2,
+            "ticket-1": [True, False, True, False, True],
+            "ticket-2": [False, True, False, True, False],
+            "__notes_ticket-1": "Keep this note",
+            "__ad_setup_ticket-1": {"account": "TESTUSER"},
+        })
+        self.assertEqual(task_storage.get("ticket-1"), [True, False, True, False])
+        self.assertEqual(task_storage.get("ticket-2"), [False, True, False, True])
+        self.assertEqual(task_storage.get_notes("ticket-1"), "Keep this note")
+        self.assertEqual(task_storage._data["__ad_setup_ticket-1"], {"account": "TESTUSER"})
+        save.assert_called_once()
+
     def test_current_schema_is_not_migrated_again(self):
-        current = [True, True, True, False, True]
+        current = [True, True, True, False]
         task_storage, save = self._load(
             {
                 "__task_schema_version": TASK_SCHEMA_VERSION,
@@ -115,30 +128,6 @@ class TaskStorageMigrationTests(unittest.TestCase):
             task_storage.get_ad_setup("ticket-5")["password"], "Legacy#42"
         )
         save_password.assert_called_once_with("ticket-5", "Legacy#42")
-        save.assert_called_once()
-
-    def test_access_card_cache_keeps_only_the_server_contract(self):
-        task_storage, _ = self._load(
-            {"__task_schema_version": TASK_SCHEMA_VERSION}
-        )
-        with patch("storage._save") as save:
-            task_storage.mark_access_card(
-                "ticket-6",
-                {
-                    "status": "reserved",
-                    "jira_key": "GSD-123",
-                    "full_name": "Aistė Žukaitė",
-                    "card_id": "LT5053",
-                    "numeric_part": 5053,
-                    "is_confirmed": True,
-                    "unexpected": "do not persist",
-                },
-            )
-
-        cached = task_storage.get_access_card("ticket-6")
-        self.assertEqual(cached["card_id"], "LT5053")
-        self.assertNotIn("unexpected", cached)
-        self.assertIn("checked_at", cached)
         save.assert_called_once()
 
 

@@ -4,9 +4,9 @@
 |---|---|
 | Audience | IT Service Desk team members handling employee onboarding |
 | Supported locations | Vilnius, Šiauliai, Poznań / Poland, and GBS |
-| Application version | 1.7.0 |
+| Application version | 1.8.0 |
 | Owner | IT Service Desk |
-| Last updated | 24 September 2026 |
+| Last updated | 28 September 2026 |
 | Estimated setup time | 5–10 minutes |
 
 ## Purpose
@@ -55,7 +55,8 @@ mismatch, invalid OU, or stale preview. Completion is saved only after final AD
 verification passes.
 
 Permission-controlled memberships found in the audit history—including
-`Disable_USB`, `VPN_IT_integracijos`, and `GrayList_WillGrow Users`—are excluded
+`Disable_USB`, `VPN_IT_integracijos`, `GrayList_WillGrow Users`,
+`Driver Hiring Manager`, and `Driver Hiring Admin`—are excluded
 from automatic copying and remain a manual follow-up. If AD denies another group
 addition or removal, the mover workflow continues applying the remaining safe
 changes, reports every failed membership in the execution output, and does not
@@ -77,9 +78,9 @@ You do **not** need to install Python, download repository source files, run
 ## 1. Download and install Jira Reminders
 
 1. Open the official
-   [Jira Reminders v1.7.0 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.7.0).
+   [Jira Reminders v1.8.0 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.8.0).
 2. Download
-   [Jira-Reminders-1.7.0.msi](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/download/v1.7.0/Jira-Reminders-1.7.0.msi).
+   [Jira-Reminders-1.8.0.msi](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/download/v1.8.0/Jira-Reminders-1.8.0.msi).
 3. Open the downloaded MSI.
 4. Complete the Windows Installer process.
 5. Wait for **Welcome to Jira Reminders** to open automatically.
@@ -90,7 +91,7 @@ The installer creates:
 - a **Jira Reminders** Start menu shortcut; and
 - a Windows Startup shortcut so the app launches whenever you sign in.
 
-> **Unknown publisher:** Version 1.7.0 is not Authenticode-signed, so Windows
+> **Unknown publisher:** Version 1.8.0 is not Authenticode-signed, so Windows
 > may show an **Unknown publisher** message. Only continue when the MSI was
 > downloaded from the official GitHub release above. If company policy blocks
 > it, contact the application owner instead of bypassing the policy.
@@ -155,7 +156,8 @@ the application owner instructs you to do so.
 After saving:
 
 1. Confirm the main Jira Reminders window opens.
-2. Confirm the window shows onboarding tickets assigned to you.
+2. Confirm the **New joiners** and **Movers** tabs are visible and show tickets
+   assigned to you.
 3. Close the window and confirm the app remains available in the system tray.
 4. Right-click the tray icon and select **Show tickets**.
 5. Confirm the Desktop shortcut opens the application.
@@ -187,6 +189,24 @@ The app automatically:
 - sends a morning summary when relevant joiners are due within seven days; and
 - checks GitHub releases for application updates.
 
+### Ticket navigation and checklist
+
+Use **New joiners** for onboarding and **Movers** for employee moves. Background
+refreshes keep the selected ticket, notes, and scroll position when the displayed
+information has not changed. Scroll with the mouse wheel or touchpad; a nested
+text area hands scrolling to the surrounding page at its boundary.
+
+The onboarding checklist contains:
+
+1. Active Directory account setup
+2. Axapta account import/creation
+3. AX user relations assignment
+4. Assign hardware & licenses in Snipe-IT
+
+Existing completion state for these tasks is retained during upgrade. The AD
+checkmark follows setup verification; complete the other items as their work is
+done.
+
 ## Joiner AD setup and completion
 
 Review the plan in **AD Setup** before applying it with administrator credentials.
@@ -213,32 +233,30 @@ setups can remain complete when available checks pass, but the summary explicitl
 shows when the old log lacks a full baseline. Review all group advisories and
 verification limitations before handing the account over.
 
-## Access-card printing
+### Read the verification pane
 
-The **Card printer** tab appears only when the signed-in Windows operator's own
-AD Office is recognised as Vilnius, including Girteka Park. Other or unavailable
-offices keep the tab hidden. Connect to the corporate network/VPN and refresh
-if the expected tab is missing.
+The **Account** row beneath Username shows the enabled state from the latest AD
+result:
 
-The registry owner must deploy and acceptance-test the shared workbook flow
-using the [OneDrive sync guide](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/blob/v1.7.0/docs/ACCESS_CARD_ONEDRIVE_FLOW.md).
-Then sync the shared `AccessCardQueue` folder to your PC and select it under
-**Settings → Advanced settings → Choose queue folder…**. It must contain
-`Requests`, `Results`, `Processed`, and `Staging`. This connection uses existing
-OneDrive sign-in; no additional app registration or Microsoft sign-in is needed.
-The installer does not deploy the flow.
+| Account text | Meaning |
+|---|---|
+| **Enabled**, green | AD reported that the account is enabled. |
+| **Disabled**, red | AD reported that the account is disabled. |
+| **Unknown**, gray | No enabled-state result is available. Connect to the corporate network/VPN and use **Check AD**. |
 
-After saving, refresh Jira and choose an assigned joiner or rejoiner in Card
-printer. The app automatically requests the registry record and checks pending
-results every 15 seconds. New joiners receive IDs from LT5053 onward; rejoiners
-reuse one unambiguous historical record without changing Excel. Movers are
-excluded. The workbook flow is the only card-number allocator.
+The heading reports overall setup verification. An **Enabled** account can still
+need attention for its attributes, mail routing, or other setup checks. A saved
+confirmation of work completed on another computer is labelled **AD completed
+externally — user confirmed** and does not claim a live verification result.
 
-The confirmed name and numeric ID fill automatically. Select **Export PNG** and
-open the image in your card-printing software. Manual entry is unavailable, and
-export stays disabled for pending, blocked, or ambiguous results. If a request
-stays pending, check OneDrive sync and ask the registry owner to inspect the
-flow run history. Follow the guide's recovery steps for manual-review results.
+Use **Copy username**, **Copy password**, and **Copy phone** to copy individual
+values. **Copy message** copies a greeting with the current username and no
+password. If no password is stored on this computer, the pane says so and hides
+its copy button. Sensitive clipboard copies clear automatically after 30 seconds.
+
+Verified summaries show the group count and current OU returned by AD when
+available. Failed or limited checks retain their diagnostic messages below the
+account details.
 
 ## Supported locations
 
@@ -279,8 +297,6 @@ the `@girteka.eu` domain during onboarding.
   automatically after 30 seconds.
 - Personal settings, checklist progress, notes, backups, and the AD audit log
   are stored under `%USERPROFILE%\.jira-reminders`.
-- The optional SharePoint-list and HTTP card connections store Microsoft tokens
-  in Windows DPAPI-encrypted caches. The OneDrive connection uses existing sync.
 - Uninstalling the app keeps this personal data so it is available after a
   reinstall.
 - Never include API tokens, passwords, or generated AD scripts in screenshots
@@ -290,11 +306,14 @@ the `@girteka.eu` domain during onboarding.
 
 When a newer release is available, the app displays an update prompt.
 
-1. Select **Install now**.
+1. Save your current work, then select **Install now**.
 2. Wait while Windows Installer updates the application.
 3. Jira Reminders restarts automatically.
 
-You can also right-click the tray icon and select **Check for updates**.
+You can also right-click the tray icon and select **Check for updates**, or
+run the current MSI from the release link above. Existing settings, notes, and
+completion state for the four current tasks are retained. After upgrading,
+reopen a joiner ticket and use **Check AD** to refresh its verification result.
 
 ## Troubleshooting
 
@@ -310,8 +329,6 @@ You can also right-click the tray icon and select **Check for updates**.
 | Notifications do not appear | Confirm Windows notifications are enabled for Jira Reminders and that Focus/Do Not Disturb is not suppressing them. |
 | A location or address looks wrong | Compare the ticket's **Office Location** and company fields. Do not apply AD changes until the mismatch is reviewed. |
 | A previously completed AD task is unchecked | Open the ticket and select **Check AD** while connected to the corporate network/VPN. Review the live mismatch or unavailable-AD message; saved history is retained. |
-| Card printer is missing | The tab requires the operator's own AD Office to resolve to Vilnius. Reconnect to the corporate network/VPN and refresh. |
-| Card export is disabled | Wait for a matching confirmed registry result. Check OneDrive sync and the flow run history, or ask the registry owner to resolve the displayed manual-review issue. |
 | Reinstalling did not show first-time setup | Existing settings are intentionally retained in `%USERPROFILE%\.jira-reminders`. Open **Tray icon → Settings** to update them. |
 
 ## Uninstalling
@@ -340,5 +357,5 @@ Never provide your Jira or Snipe-IT API token.
 
 ## References
 
-- [Jira Reminders v1.7.0 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.7.0)
+- [Jira Reminders v1.8.0 release](https://github.com/IgnasTamosaitis/Jira-onboarding-helper/releases/tag/v1.8.0)
 - [Atlassian — Manage API tokens for your account](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/)

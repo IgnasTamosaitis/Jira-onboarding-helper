@@ -1,30 +1,44 @@
 # Release Notes
 
-## v1.7.0 - Shared access-card registry and live AD verification
+## v1.8.0 - Clearer AD status and smoother ticket workflows
+
+Released 28 September 2026.
+
+### Ticket views
+
+- Align the AD summary fields, phone number, and action buttons, and reduce
+  unnecessary spacing.
+- Show an Account row beneath Username: Enabled in green, Disabled in red,
+  and Unknown in gray when no enabled-state result is available.
+- Show current AD group counts and OU details when available, with copy actions
+  for username, locally stored password, phone number, and a username greeting.
+- Preserve notes, selections, and scroll positions during unchanged background
+  refreshes in joiner and mover views.
+- Improve mouse-wheel and touchpad scrolling across nested panels and dialogs.
+- Provide New joiners and Movers tabs with a four-task onboarding checklist.
+  Upgrade existing checklist data while preserving progress for current tasks.
+
+### Active Directory
+
+- Recognize x-prefixed employee usernames and read buddy account status reliably
+  when PowerShell emits additional output.
+- Preserve recorded external completion confirmations across refreshes and
+  restarts, while clearly distinguishing them from live verification.
+- Keep Driver Hiring Manager and Driver Hiring Admin memberships out of
+  automatic group changes.
+
+### Installation and instructions
+
+Download `Jira-Reminders-1.8.0.msi` from this release, or use **Check for updates**.
+The installer upgrades existing installations and preserves settings and notes.
+The README, build guide, and operating guide in Markdown and Word now describe
+this release's interface, AD status colors, copy actions, and upgrade steps.
+
+---
+
+## v1.7.0 - Live AD verification
 
 Released 24 September 2026.
-
-### Access cards
-
-- Connected Card printer to assigned joiners and rejoiners. Verified Excel
-  records fill the read-only employee name and card number; PNG export stays
-  disabled until a matching reservation is confirmed.
-- Added a OneDrive queue connection using existing sync and Standard Power
-  Automate connectors, without a desktop Entra registration. Pending requests
-  are checked every 15 seconds and survive retries and app restarts.
-- Added optional SharePoint request-list and Premium HTTP connections with
-  Microsoft sign-in and Windows DPAPI-encrypted token caches.
-- Added a serialized Office Script for the AccessCards worksheet. New joiners
-  claim IDs from LT5053 onward, preserving historical gaps. Rejoiners reuse one
-  unambiguous historical ID and name spelling without changing Excel.
-- Added Jira-key idempotency, duplicate-card detection, verified writes,
-  request/employee identity checks, and cache isolation between registries.
-  Missing or ambiguous records require manual review.
-- Restricted the card tab and automatic reservations to operators whose own
-  AD Office is recognised as Vilnius. The check runs in the background at
-  startup and Jira refresh; movers do not submit card requests.
-- Fixed settings validation so invalid queue folders or SharePoint locations
-  show an error and keep Settings open for correction.
 
 ### Active Directory setup
 
@@ -53,16 +67,8 @@ Download `Jira-Reminders-1.7.0.msi` from this release, or use **Check for update
 The installer upgrades existing installations and preserves settings and tasks.
 The required AD setup password is unchanged.
 
-Card automation needs a separately deployed and acceptance-tested tenant flow;
-the MSI does not deploy it. Follow the [OneDrive sync guide](docs/ACCESS_CARD_ONEDRIVE_FLOW.md),
-then choose the shared queue folder under **Settings → Advanced settings**.
-Use only one writer flow per workbook. Earlier manual card entry is replaced by
-registry-confirmed printing. If the card tab is missing, connect to the corporate
-network/VPN and refresh so the app can check the operator's AD Office.
-
-Updated the README, deployment guides, and team KB in Markdown and Word formats.
-Added automated coverage for the queue transports, card UI, workbook allocator,
-authentication, AD execution, live verification, and stored completion state.
+Updated the README and team KB in Markdown and Word formats.
+Added automated coverage for AD execution, live verification, and stored completion state.
 
 ---
 
@@ -104,7 +110,7 @@ Released 4 September 2026.
   recognised in joiner and mover tickets
 - Added targeted Girteka email/proxy alignment for movers into Girteka Dedicated
   and cleanup of any remaining `@tndmtrucking.com` proxy addresses
-- Refined the onboarding checklist to five key tasks: removed Hardware
+- Refined the onboarding checklist with key tasks: removed Hardware
   preparation and SIM assignment, added AX user relations assignment, and
   preserved applicable completion state from older checklist layouts
 - Removed the standalone hardware deployment workflow; Snipe-IT integration is

@@ -34,12 +34,12 @@ class CompletionTests(unittest.TestCase):
         with patch('storage._load', return_value={
             '__task_schema_version': TASK_SCHEMA_VERSION,
             '__ad_setup_123': {'completed_at': 'previous', 'account': 'USER'},
-            '123': [True, True, False, True, False],
+            '123': [True, True, False, True],
         }), patch('storage._save'):
             storage = TaskStorage()
             storage.mark_ad_setup_incomplete('123', 'Not completed')
         self.assertFalse(storage.ad_setup_done('123'))
-        self.assertEqual(storage.get('123'), [False, True, False, True, False])
+        self.assertEqual(storage.get('123'), [False, True, False, True])
         self.assertEqual(storage._data['__ad_setup_123']['account'], 'USER')
 
     def test_window_records_failure_instead_of_completion(self):
