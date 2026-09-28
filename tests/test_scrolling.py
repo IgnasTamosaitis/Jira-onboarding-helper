@@ -74,11 +74,14 @@ class ScrollingTests(unittest.TestCase):
         send.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
         send.restype = ctypes.c_ssize_t
         x, y = self.text.winfo_rootx() + 5, self.text.winfo_rooty() + 5
-        # Deliver to our own test window: Tk 9 converts this Windows message
-        # to TouchpadScroll because its delta is not a multiple of 120.
-        send(self.text.winfo_id(), 0x020A, ((-30) & 0xffff) << 16,
-             ((y & 0xffff) << 16) | (x & 0xffff))
-        self.root.update()
+        # Tk 9 delivers each small native movement as TouchpadScroll. Tk 8.6
+        # accumulates four of these movements before delivering MouseWheel.
+        tk9 = self.root.tk.call("package", "vcompare",
+                                self.root.tk.call("package", "provide", "Tk"), "9.0") >= 0
+        for _ in range(1 if tk9 else 4):
+            send(self.text.winfo_id(), 0x020A, ((-30) & 0xffff) << 16,
+                 ((y & 0xffff) << 16) | (x & 0xffff))
+            self.root.update()
         self.assertGreater(self.canvas.yview()[0], 0)
 
     def test_small_trackpad_delta_over_input_scrolls_page(self):
